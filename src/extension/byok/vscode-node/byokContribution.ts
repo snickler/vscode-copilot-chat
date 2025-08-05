@@ -60,7 +60,7 @@ export class BYOKContrib extends Disposable implements IExtensionContribution {
 			const knownModels = await this.fetchKnownModelList(this._fetcherService);
 			this._providers.set(OllamaLMProvider.providerName.toLowerCase(), instantiationService.createInstance(OllamaLMProvider, this._configurationService.getConfig(ConfigKey.OllamaEndpoint), this._byokStorageService));
 			this._providers.set(AnthropicLMProvider.providerName.toLowerCase(), instantiationService.createInstance(AnthropicLMProvider, knownModels[AnthropicLMProvider.providerName], this._byokStorageService));
-			this._providers.set(FoundryLocalLMProvider.providerName.toLowerCase(), instantiationService.createInstance(FoundryLocalLMProvider, this._configurationService.getConfig(ConfigKey.FoundryLocalEndpoint), this._byokStorageService));
+			this._providers.set(FoundryLocalLMProvider.providerName.toLowerCase(), instantiationService.createInstance(FoundryLocalLMProvider, this._byokStorageService));
 			this._providers.set(GroqBYOKLMProvider.providerName.toLowerCase(), instantiationService.createInstance(GroqBYOKLMProvider, knownModels[GroqBYOKLMProvider.providerName], this._byokStorageService));
 			this._providers.set(GeminiBYOKLMProvider.providerName.toLowerCase(), instantiationService.createInstance(GeminiBYOKLMProvider, knownModels[GeminiBYOKLMProvider.providerName], this._byokStorageService));
 			this._providers.set(OAIBYOKLMProvider.providerName.toLowerCase(), instantiationService.createInstance(OAIBYOKLMProvider, knownModels[OAIBYOKLMProvider.providerName], this._byokStorageService));

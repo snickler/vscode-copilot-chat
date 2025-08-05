@@ -2,7 +2,9 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-import { IChatModelInformation } from '../../../platform/endpoint/common/endpointProvider';
+
+import { FoundryLocalManager } from 'foundry-local-sdk';
+import { CancellationToken, LanguageModelChatInformation } from 'vscode';
 import { ILogService } from '../../../platform/log/common/logService';
 import { IFetcherService } from '../../../platform/networking/common/fetcherService';
 import { IInstantiationService } from '../../../util/vs/platform/instantiation/common/instantiation';
@@ -10,176 +12,138 @@ import { BYOKAuthType, BYOKKnownModels, BYOKModelCapabilities } from '../common/
 import { BaseOpenAICompatibleLMProvider } from './baseOpenAICompatibleProvider';
 import { IBYOKStorageService } from './byokStorageService';
 
-// Import Foundry Local SDK
-import { FoundryLocalManager } from 'foundry-local-sdk';
-
-// Minimum supported Foundry Local version - versions below this may have compatibility issues
-const MINIMUM_FOUNDRY_VERSION = '1.0.0';
-
 export class FoundryLocalLMProvider extends BaseOpenAICompatibleLMProvider {
-	public static readonly providerName = 'FoundryLocal';
-	private _modelCache = new Map<string, IChatModelInformation>();
-	private _foundryManager: FoundryLocalManager | undefined;
+	static readonly providerName = 'FoundryLocal';
+	private readonly _foundryManager: FoundryLocalManager;
 
 	constructor(
-		foundryServiceUrl: string | undefined,
 		byokStorageService: IBYOKStorageService,
-		@IFetcherService _fetcherService: IFetcherService,
-		@ILogService _logService: ILogService,
-		@IInstantiationService _instantiationService: IInstantiationService,
+		@IFetcherService fetcherService: IFetcherService,
+		@ILogService logService: ILogService,
+		@IInstantiationService instantiationService: IInstantiationService,
 	) {
-		// Create Foundry manager - if serviceUrl is provided, use the browser version
-		// Otherwise use the Node.js version which auto-discovers the service
-		const foundryManager = foundryServiceUrl
-			? new (FoundryLocalManager as any)({ serviceUrl: foundryServiceUrl })  // Browser version
-			: new FoundryLocalManager();  // Node.js version with auto-discovery
-
+		// Initialize with no auth required, provider name, and default base URL
 		super(
 			BYOKAuthType.None,
 			FoundryLocalLMProvider.providerName,
-			foundryManager.endpoint,
-			undefined,
+			'http://localhost:5273/v1', // Default base URL with /v1 - will be updated dynamically from SDK
+			undefined, // Known models will be fetched dynamically
 			byokStorageService,
-			_fetcherService,
-			_logService,
-			_instantiationService
+			fetcherService,
+			logService,
+			instantiationService
 		);
-
-		this._foundryManager = foundryManager;
+		// Initialize FoundryLocalManager with optional configuration (as per SDK docs)
+		this._foundryManager = new FoundryLocalManager();
 	}
 
-	private async _getFoundryModelInformation(modelId: string): Promise<{
-		alias: string;
-		displayName: string;
-		modelId: string;
-		version: string;
-		fileSizeMb: number;
-		supportsToolCalling: boolean;
-		task: string;
-	}> {
-		if (!this._foundryManager) {
-			throw new Error('Foundry Local manager not initialized');
+	private async ensureServiceAndModel(alias?: string): Promise<void> {
+		try {
+			// Start Foundry Local service if not running
+			await this._foundryManager.startService();
+			const isRunning = await this._foundryManager.isServiceRunning();
+			if (!isRunning) {
+				throw new Error('Foundry Local service is not running. Please start the service with `foundry service start`.');
+			}
+
+			// Initialize with a model if provided - this is the proper SDK pattern
+			if (alias) {
+				// Use init() method as shown in documentation - this downloads and loads the model
+				await this._foundryManager.init(alias);
+			}
+
+			// Set the API key in the base class - use the SDK's apiKey property
+			const apiKey = this._foundryManager.apiKey || 'OPENAI_API_KEY'; // Default as per documentation
+			(this as any)._apiKey = apiKey;
+
+			// Update the base URL to use the actual endpoint from Foundry Manager
+			// The endpoint includes /v1, and BaseOpenAICompatibleLMProvider appends /chat/completions
+			// So we keep the /v1 to get the correct final URL: http://localhost:5273/v1/chat/completions
+			const endpoint = this._foundryManager.endpoint; // e.g., "http://localhost:5273/v1"
+			const baseUrl = endpoint; // Keep /v1 in the base URL
+			this._logService.info(`Foundry Manager Endpoint: ${endpoint} -> Base URL: ${baseUrl}`);
+			(this as any)._baseUrl = baseUrl;
+		} catch (e) {
+			this._logService.error(`FoundryLocalManager error: ${e}`);
+			throw e;
 		}
-
-		const modelInfo = await this._foundryManager.getModelInfo(modelId);
-		if (!modelInfo) {
-			throw new Error(`Model ${modelId} not found`);
-		}
-
-		// Map the SDK's FoundryModelInfo to our expected format
-		return {
-			alias: modelInfo.alias || modelId,
-			displayName: modelInfo.alias || modelId, // Use alias as display name since SDK doesn't have displayName
-			modelId: modelInfo.id || modelId,
-			version: modelInfo.version || '1.0.0',
-			fileSizeMb: modelInfo.modelSize || 0,
-			supportsToolCalling: true, // SDK doesn't expose this, we'll need to infer it
-			task: modelInfo.task || 'chat-completion',
-		};
-	}
-
-	override async getModelInfo(modelId: string, apiKey: string, modelCapabilities?: BYOKModelCapabilities): Promise<IChatModelInformation> {
-		if (this._modelCache.has(modelId)) {
-			return this._modelCache.get(modelId)!;
-		}
-
-		if (!modelCapabilities) {
-			const modelInfo = await this._getFoundryModelInformation(modelId);
-
-			// Default context window - may need to be adjusted based on specific models
-			// Foundry Local documentation doesn't specify context lengths per model
-			const contextWindow = 4096; // Conservative default
-			const outputTokens = Math.min(contextWindow / 2, 4096);
-
-			// Infer vision capability from model name/alias if not explicitly available
-			const hasVision = modelInfo.alias?.toLowerCase().includes('vision') ||
-				modelInfo.displayName?.toLowerCase().includes('vision') ||
-				modelInfo.task === 'multimodal' ||
-				modelInfo.task === 'vision';
-
-			modelCapabilities = {
-				name: modelInfo.displayName,
-				maxOutputTokens: outputTokens,
-				maxInputTokens: contextWindow - outputTokens,
-				vision: hasVision,
-				toolCalling: modelInfo.supportsToolCalling
-			};
-		}
-
-		return super.getModelInfo(modelId, apiKey, modelCapabilities);
 	}
 
 	protected override async getAllModels(): Promise<BYOKKnownModels> {
-		if (!this._foundryManager) {
-			throw new Error('Foundry Local manager not initialized');
-		}
-
 		try {
-			// Check if service is running and start if needed
-			await this._checkFoundryService();
+			// Ensure service is running and base configuration is set
+			await this.ensureServiceAndModel();
 
-			// Get available models from catalog
-			const models = await this._foundryManager.listCatalogModels();
+			// Get available models from Foundry Local catalog using SDK method
+			const catalog = await this._foundryManager.listCatalogModels();
 			const knownModels: BYOKKnownModels = {};
 
-			for (const model of models) {
-				const modelInfo = await this.getModelInfo(model.alias || model.id, '', undefined);
-				this._modelCache.set(model.alias || model.id, modelInfo);
-				knownModels[model.alias || model.id] = {
-					maxInputTokens: modelInfo.capabilities.limits?.max_prompt_tokens ?? 4096,
-					maxOutputTokens: modelInfo.capabilities.limits?.max_output_tokens ?? 4096,
-					name: modelInfo.name,
-					toolCalling: !!modelInfo.capabilities.supports.tool_calls,
-					vision: !!modelInfo.capabilities.supports.vision
+			for (const model of catalog) {
+				// Use alias if available, otherwise use id (following SDK documentation pattern)
+				const modelId = model.id;
+				// Infer capabilities from model metadata
+				const hasVision = model.task === 'multimodal' || model.task === 'vision' ||
+					modelId.toLowerCase().includes('vision');
+
+				// Conservative token limits - can be adjusted based on specific models
+				const maxInputTokens = 4096;
+				const maxOutputTokens = 4096;
+
+				knownModels[modelId] = {
+					name: model.alias,
+					thinking: modelId.toLowerCase().includes('thinking') || modelId.toLowerCase().includes('reasoning'),
+					url: model.uri, // Use model URL if available
+					maxInputTokens,
+					maxOutputTokens,
+					vision: hasVision,
+					toolCalling: true // Most modern models support tool calling
 				};
 			}
+
 			return knownModels;
 		} catch (e) {
-			// Check if this is our service check error and preserve it
-			if (e instanceof Error && e.message.includes('Foundry Local service')) {
-				throw e;
-			}
-			throw new Error('Failed to fetch models from Foundry Local. Please ensure Foundry Local is installed and running. You can start the service with `foundry service start`.');
+			this._logService.error(`Error fetching Foundry Local models: ${e}`);
+			throw new Error(`Failed to fetch models from Foundry Local. Please ensure Foundry Local is installed and running. You can start the service with 'foundry service start'.`);
 		}
 	}
 
-	/**
-	 * Check if the Foundry Local service is running and accessible
-	 * @throws Error if service is not accessible or version check fails
-	 */
-	private async _checkFoundryService(): Promise<void> {
-		if (!this._foundryManager) {
-			throw new Error('Foundry Local manager not initialized');
+	protected override async getModelInfo(modelId: string, apiKey: string | undefined, modelCapabilities?: BYOKModelCapabilities): Promise<any> {
+		// Ensure the specific model is loaded using the init() method
+		await this.ensureServiceAndModel(modelId);
+
+		// Get model info from Foundry Local using correct SDK signature
+		const modelInfo = await this._foundryManager.getModelInfo(modelId, false); // throwOnNotFound = false
+		if (!modelInfo) {
+			throw new Error(`Model ${modelId} not found in Foundry Local catalog.`);
 		}
 
+		// Use base class method with Foundry Local specific capabilities
+		if (!modelCapabilities) {
+			const hasVision = modelInfo.task === 'multimodal' || modelInfo.task === 'vision' ||
+				modelId.toLowerCase().includes('vision');
+
+			modelCapabilities = {
+				name: modelId,
+				maxInputTokens: 4096,
+				maxOutputTokens: 4096,
+				vision: hasVision,
+				toolCalling: true
+			};
+		}
+
+		// Use the API key from FoundryLocalManager, fallback to provided apiKey
+		const foundryApiKey = this._foundryManager.apiKey || apiKey || 'OPENAI_API_KEY'; // Default as per documentation
+		return super.getModelInfo(modelId, foundryApiKey, modelCapabilities);
+	}
+
+	override async prepareLanguageModelChat(options: { silent: boolean }, token: CancellationToken): Promise<LanguageModelChatInformation[]> {
 		try {
-			await this._foundryManager.startService();
-			// Check if service is running
-			const isRunning = await this._foundryManager.isServiceRunning();
-
-			if (!isRunning) {
-				throw new Error(
-					'Foundry Local service is not running. ' +
-					'Please start the service with `foundry service start` command. ' +
-					'Make sure Foundry Local is installed and properly configured.'
-				);
-			}
-
-			// Note: The Foundry Local SDK doesn't expose a direct version check method
-			// We'll rely on service availability as the primary check
-			// If version checking becomes critical, it could be added via direct REST API calls
-
+			// Ensure service is running and get models
+			await this.ensureServiceAndModel();
+			return super.prepareLanguageModelChat(options, token);
 		} catch (e) {
-			if (e instanceof Error && e.message.includes('Foundry Local service')) {
-				// Re-throw our custom service error
-				throw e;
-			}
-			// If any other error occurs during service check
-			throw new Error(
-				`Unable to connect to Foundry Local service. ` +
-				`Please ensure Foundry Local version ${MINIMUM_FOUNDRY_VERSION} or higher is installed and running. ` +
-				`You can start the service with 'foundry service start'.`
-			);
+			this._logService.error(`prepareLanguageModelChat error: ${e}`);
+			return [];
 		}
 	}
 }

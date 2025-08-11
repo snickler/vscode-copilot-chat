@@ -73,26 +73,47 @@ export class FoundryLocalLMProvider extends BaseOpenAICompatibleLMProvider {
 	 */
 	private async _getFoundryModelDetails(modelId: string): Promise<FoundryLocalModelDetails> {
 		try {
-			// Try to get model details from a model-specific endpoint
-			const response = await this._fetcherService.fetch(`${this._foundryBaseUrl}/api/models/${modelId}`, {
-				method: 'GET',
-				headers: {
-					'Content-Type': 'application/json'
-				}
-			});
+			// Try multiple potential endpoints for model details
+			const endpoints = [
+				`${this._foundryBaseUrl}/api/models/${modelId}`,
+				`${this._foundryBaseUrl}/v1/models/${modelId}`,
+				`${this._foundryBaseUrl}/models/${modelId}`
+			];
 
-			if (!response.ok) {
-				// If model-specific endpoint doesn't exist, return basic info
-				return {
-					id: modelId,
-					name: modelId,
-					context_length: 4096,
-					max_tokens: 2048
-				};
+			for (const endpoint of endpoints) {
+				try {
+					const response = await this._fetcherService.fetch(endpoint, {
+						method: 'GET',
+						headers: {
+							'Content-Type': 'application/json'
+						}
+					});
+
+					if (response.ok) {
+						const details = await response.json() as FoundryLocalModelDetails;
+						return {
+							id: details.id || modelId,
+							name: details.name || modelId,
+							description: details.description,
+							capabilities: details.capabilities || [],
+							context_length: details.context_length || 4096,
+							max_tokens: details.max_tokens || Math.min((details.context_length || 4096) / 2, 2048)
+						};
+					}
+				} catch (endpointError) {
+					// Continue to next endpoint
+					this._logService.debug(`Failed to fetch model details from ${endpoint}: ${endpointError}`);
+				}
 			}
 
-			const details = await response.json() as FoundryLocalModelDetails;
-			return details;
+			// If all endpoints fail, return basic fallback info
+			return {
+				id: modelId,
+				name: modelId,
+				context_length: 4096,
+				max_tokens: 2048,
+				capabilities: []
+			};
 		} catch (error) {
 			// Fallback to basic model info if detailed info isn't available
 			this._logService.warn(`Failed to get detailed info for model ${modelId}: ${error}`);
@@ -100,7 +121,8 @@ export class FoundryLocalLMProvider extends BaseOpenAICompatibleLMProvider {
 				id: modelId,
 				name: modelId,
 				context_length: 4096,
-				max_tokens: 2048
+				max_tokens: 2048,
+				capabilities: []
 			};
 		}
 	}
@@ -159,7 +181,19 @@ export class FoundryLocalLMProvider extends BaseOpenAICompatibleLMProvider {
 			const modelsResponse = await response.json() as FoundryLocalModelsResponse;
 			const knownModels: BYOKKnownModels = {};
 
+			// Validate response structure
+			if (!modelsResponse.data || !Array.isArray(modelsResponse.data)) {
+				this._logService.warn('Invalid models response format from Foundry Local service');
+				return {};
+			}
+
 			for (const model of modelsResponse.data) {
+				// Skip models without valid IDs
+				if (!model.id || typeof model.id !== 'string') {
+					this._logService.warn('Skipping model with invalid ID:', model);
+					continue;
+				}
+
 				try {
 					const modelInfo = await this.getModelInfo(model.id, '', undefined);
 					this._modelCache.set(model.id, modelInfo);
@@ -174,6 +208,10 @@ export class FoundryLocalLMProvider extends BaseOpenAICompatibleLMProvider {
 					// If we can't get info for a specific model, log and continue
 					this._logService.warn(`Failed to get info for model ${model.id}: ${error}`);
 				}
+			}
+
+			if (Object.keys(knownModels).length === 0) {
+				this._logService.warn('No valid models found from Foundry Local service');
 			}
 
 			return knownModels;
@@ -208,6 +246,15 @@ export class FoundryLocalLMProvider extends BaseOpenAICompatibleLMProvider {
 				if (healthData.status !== 'ok' && healthData.status !== 'healthy') {
 					throw new Error('Foundry Local service is not healthy');
 				}
+				
+				// Optional version check if version is provided
+				if (healthData.version && !this._isVersionSupported(healthData.version)) {
+					this._logService.warn(
+						`Foundry Local version ${healthData.version} may not be fully supported. ` +
+						`Consider upgrading to version ${MINIMUM_FOUNDRY_VERSION} or higher for best compatibility.`
+					);
+				}
+				
 				return; // Service is healthy
 			}
 		} catch (healthError) {

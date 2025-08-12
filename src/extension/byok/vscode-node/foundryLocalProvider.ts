@@ -10,39 +10,13 @@ import { BYOKAuthType, BYOKKnownModels, BYOKModelCapabilities } from '../common/
 import { BaseOpenAICompatibleLMProvider } from './baseOpenAICompatibleProvider';
 import { IBYOKStorageService } from './byokStorageService';
 
-// Foundry Local API response interfaces
-interface FoundryLocalModelResponse {
-	id: string;
-	object: string;
-	owned_by: string;
-}
-
-interface FoundryLocalModelsResponse {
-	object: string;
-	data: FoundryLocalModelResponse[];
-}
-
-interface FoundryLocalModelDetails {
-	id: string;
-	name?: string;
-	description?: string;
-	capabilities?: string[];
-	context_length?: number;
-	max_tokens?: number;
-}
-
-interface FoundryLocalHealthResponse {
-	status: string;
-	version?: string;
-}
-
-// Minimum supported Foundry Local version - versions below this may have compatibility issues
-const MINIMUM_FOUNDRY_VERSION = '1.0.0';
+// Import Foundry Local SDK
+import { FoundryLocalManager, FoundryModelInfo } from 'foundry-local-sdk';
 
 export class FoundryLocalLMProvider extends BaseOpenAICompatibleLMProvider {
 	public static readonly providerName = 'FoundryLocal';
 	private _modelCache = new Map<string, IChatModelInformation>();
-	private readonly _foundryBaseUrl: string;
+	private _foundryManager: FoundryLocalManager;
 
 	constructor(
 		foundryServiceUrl: string | undefined,
@@ -51,13 +25,29 @@ export class FoundryLocalLMProvider extends BaseOpenAICompatibleLMProvider {
 		@ILogService _logService: ILogService,
 		@IInstantiationService _instantiationService: IInstantiationService,
 	) {
-		// Use provided URL or default to localhost
-		const baseUrl = foundryServiceUrl || 'http://localhost:5273';
+		// Create Foundry manager based on environment
+		// For browser environments or when a specific URL is provided, use the browser version
+		// For Node.js environments without URL, use auto-discovery
+		let foundryManager: FoundryLocalManager;
 		
+		if (foundryServiceUrl) {
+			// Use browser-compatible version with explicit service URL
+			const { FoundryLocalManager: BrowserFoundryLocalManager } = require('foundry-local-sdk/browser');
+			foundryManager = new BrowserFoundryLocalManager({ 
+				serviceUrl: foundryServiceUrl,
+				fetch: _fetcherService.fetch.bind(_fetcherService)
+			});
+		} else {
+			// Use Node.js version with auto-discovery
+			foundryManager = new FoundryLocalManager({
+				fetch: _fetcherService.fetch.bind(_fetcherService)
+			});
+		}
+
 		super(
 			BYOKAuthType.None,
 			FoundryLocalLMProvider.providerName,
-			`${baseUrl}/v1`, // OpenAI-compatible endpoint
+			foundryManager.endpoint, // Use SDK-provided endpoint
 			undefined,
 			byokStorageService,
 			_fetcherService,
@@ -65,65 +55,26 @@ export class FoundryLocalLMProvider extends BaseOpenAICompatibleLMProvider {
 			_instantiationService
 		);
 
-		this._foundryBaseUrl = baseUrl;
+		this._foundryManager = foundryManager;
 	}
 
 	/**
-	 * Get detailed information about a specific Foundry Local model
+	 * Get detailed information about a specific Foundry Local model using the SDK
 	 */
-	private async _getFoundryModelDetails(modelId: string): Promise<FoundryLocalModelDetails> {
+	private async _getFoundryModelInformation(modelId: string): Promise<FoundryModelInfo> {
 		try {
-			// Try multiple potential endpoints for model details
-			const endpoints = [
-				`${this._foundryBaseUrl}/api/models/${modelId}`,
-				`${this._foundryBaseUrl}/v1/models/${modelId}`,
-				`${this._foundryBaseUrl}/models/${modelId}`
-			];
-
-			for (const endpoint of endpoints) {
-				try {
-					const response = await this._fetcherService.fetch(endpoint, {
-						method: 'GET',
-						headers: {
-							'Content-Type': 'application/json'
-						}
-					});
-
-					if (response.ok) {
-						const details = await response.json() as FoundryLocalModelDetails;
-						return {
-							id: details.id || modelId,
-							name: details.name || modelId,
-							description: details.description,
-							capabilities: details.capabilities || [],
-							context_length: details.context_length || 4096,
-							max_tokens: details.max_tokens || Math.min((details.context_length || 4096) / 2, 2048)
-						};
-					}
-				} catch (endpointError) {
-					// Continue to next endpoint
-					this._logService.debug(`Failed to fetch model details from ${endpoint}: ${endpointError}`);
-				}
+			const modelInfo = await this._foundryManager.getModelInfo(modelId);
+			if (!modelInfo) {
+				throw new Error(`Model ${modelId} not found in Foundry Local catalog`);
 			}
-
-			// If all endpoints fail, return basic fallback info
-			return {
-				id: modelId,
-				name: modelId,
-				context_length: 4096,
-				max_tokens: 2048,
-				capabilities: []
-			};
+			return modelInfo;
 		} catch (error) {
-			// Fallback to basic model info if detailed info isn't available
-			this._logService.warn(`Failed to get detailed info for model ${modelId}: ${error}`);
-			return {
-				id: modelId,
-				name: modelId,
-				context_length: 4096,
-				max_tokens: 2048,
-				capabilities: []
-			};
+			this._logService.warn(`Failed to get model info for ${modelId}: ${error}`);
+			throw new Error(
+				`Unable to get information for model "${modelId}". ` +
+				'Please ensure the model exists in the Foundry Local catalog. ' +
+				'You can list available models with `foundry model list`.'
+			);
 		}
 	}
 
@@ -133,24 +84,24 @@ export class FoundryLocalLMProvider extends BaseOpenAICompatibleLMProvider {
 		}
 
 		if (!modelCapabilities) {
-			const modelDetails = await this._getFoundryModelDetails(modelId);
+			const modelInfo = await this._getFoundryModelInformation(modelId);
 
-			// Use model-specific context length or default
-			const contextWindow = modelDetails.context_length || 4096;
-			const outputTokens = modelDetails.max_tokens || Math.min(contextWindow / 2, 2048);
+			// Default context window - Foundry Local models vary in their context lengths
+			// Use a conservative default, but this could be improved by checking model-specific info
+			const contextWindow = 4096; // Conservative default
+			const outputTokens = Math.min(contextWindow / 2, 2048);
 
-			// Infer capabilities from model details
-			const capabilities = modelDetails.capabilities || [];
-			const hasVision = capabilities.includes('vision') || 
-				modelDetails.name?.toLowerCase().includes('vision') ||
-				modelId.toLowerCase().includes('vision');
-			
-			const hasToolCalling = capabilities.includes('tools') || 
-				capabilities.includes('function_calling') ||
-				capabilities.includes('tool_calling');
+			// Infer capabilities from model information
+			const hasVision = modelInfo.alias?.toLowerCase().includes('vision') ||
+				modelInfo.task === 'multimodal' ||
+				modelInfo.task === 'vision';
+
+			// For tool calling support, we'll assume models support it unless we know otherwise
+			// The SDK doesn't explicitly expose this capability yet
+			const hasToolCalling = true;
 
 			modelCapabilities = {
-				name: modelDetails.name || modelId,
+				name: modelInfo.alias || modelInfo.id,
 				maxOutputTokens: outputTokens,
 				maxInputTokens: contextWindow - outputTokens,
 				vision: hasVision,
@@ -158,49 +109,32 @@ export class FoundryLocalLMProvider extends BaseOpenAICompatibleLMProvider {
 			};
 		}
 
-		return super.getModelInfo(modelId, apiKey, modelCapabilities);
+		const chatModelInfo = await super.getModelInfo(modelId, apiKey, modelCapabilities);
+		this._modelCache.set(modelId, chatModelInfo);
+		return chatModelInfo;
 	}
 
 	protected override async getAllModels(): Promise<BYOKKnownModels> {
 		try {
-			// Check if service is running first
-			await this._checkFoundryService();
-
-			// Get available models from the OpenAI-compatible models endpoint
-			const response = await this._fetcherService.fetch(`${this._foundryBaseUrl}/v1/models`, {
-				method: 'GET',
-				headers: {
-					'Content-Type': 'application/json'
-				}
-			});
-
-			if (!response.ok) {
-				throw new Error(`Failed to fetch models: ${response.status} ${response.statusText}`);
-			}
-
-			const modelsResponse = await response.json() as FoundryLocalModelsResponse;
+			// Use SDK to get available models from the catalog
+			const catalogModels = await this._foundryManager.listCatalogModels();
 			const knownModels: BYOKKnownModels = {};
 
-			// Validate response structure
-			if (!modelsResponse.data || !Array.isArray(modelsResponse.data)) {
-				this._logService.warn('Invalid models response format from Foundry Local service');
+			if (!catalogModels || catalogModels.length === 0) {
+				this._logService.warn('No models found in Foundry Local catalog');
 				return {};
 			}
 
-			for (const model of modelsResponse.data) {
-				// Skip models without valid IDs
-				if (!model.id || typeof model.id !== 'string') {
-					this._logService.warn('Skipping model with invalid ID:', model);
-					continue;
-				}
-
+			for (const model of catalogModels) {
 				try {
-					const modelInfo = await this.getModelInfo(model.id, '', undefined);
-					this._modelCache.set(model.id, modelInfo);
-					knownModels[model.id] = {
+					// Use the model ID for lookup
+					const modelId = model.id;
+					const modelInfo = await this.getModelInfo(modelId, '', undefined);
+					
+					knownModels[modelId] = {
 						maxInputTokens: modelInfo.capabilities.limits?.max_prompt_tokens ?? 4096,
 						maxOutputTokens: modelInfo.capabilities.limits?.max_output_tokens ?? 2048,
-						name: modelInfo.name,
+						name: model.alias || modelId,
 						toolCalling: !!modelInfo.capabilities.supports.tool_calls,
 						vision: !!modelInfo.capabilities.supports.vision
 					};
@@ -211,102 +145,26 @@ export class FoundryLocalLMProvider extends BaseOpenAICompatibleLMProvider {
 			}
 
 			if (Object.keys(knownModels).length === 0) {
-				this._logService.warn('No valid models found from Foundry Local service');
+				this._logService.warn('No valid models found from Foundry Local catalog');
 			}
 
 			return knownModels;
-		} catch (e) {
-			// Check if this is our service check error and preserve it
-			if (e instanceof Error && e.message.includes('Foundry Local service')) {
-				throw e;
+		} catch (error) {
+			// Provide helpful error message based on the error type
+			const errorMessage = error instanceof Error ? error.message : String(error);
+			
+			if (errorMessage.includes('fetch')) {
+				throw new Error(
+					'Unable to connect to Foundry Local service. Please ensure Foundry Local is installed and running. ' +
+					'You can start the service with `foundry local start` or check the Foundry Local documentation for setup instructions.'
+				);
 			}
+			
 			throw new Error(
-				'Failed to fetch models from Foundry Local. Please ensure Foundry Local is installed and running. ' +
-				'You can start the service with `foundry local start` or check the Foundry Local documentation for setup instructions.'
+				`Failed to fetch models from Foundry Local: ${errorMessage}. ` +
+				'Please ensure Foundry Local is properly installed and configured.'
 			);
 		}
 	}
 
-	/**
-	 * Check if the Foundry Local service is running and accessible
-	 * @throws Error if service is not accessible or version check fails
-	 */
-	private async _checkFoundryService(): Promise<void> {
-		try {
-			// Try to check service health/status
-			const healthResponse = await this._fetcherService.fetch(`${this._foundryBaseUrl}/health`, {
-				method: 'GET',
-				headers: {
-					'Content-Type': 'application/json'
-				}
-			});
-
-			if (healthResponse.ok) {
-				const healthData = await healthResponse.json() as FoundryLocalHealthResponse;
-				if (healthData.status !== 'ok' && healthData.status !== 'healthy') {
-					throw new Error('Foundry Local service is not healthy');
-				}
-				
-				// Optional version check if version is provided
-				if (healthData.version && !this._isVersionSupported(healthData.version)) {
-					this._logService.warn(
-						`Foundry Local version ${healthData.version} may not be fully supported. ` +
-						`Consider upgrading to version ${MINIMUM_FOUNDRY_VERSION} or higher for best compatibility.`
-					);
-				}
-				
-				return; // Service is healthy
-			}
-		} catch (healthError) {
-			// Health endpoint might not exist, try a basic models endpoint check
-			try {
-				const modelsResponse = await this._fetcherService.fetch(`${this._foundryBaseUrl}/v1/models`, {
-					method: 'GET',
-					headers: {
-						'Content-Type': 'application/json'
-					}
-				});
-
-				if (modelsResponse.ok) {
-					return; // Service responds to models endpoint
-				}
-			} catch (modelsError) {
-				// Both health and models endpoints failed
-				throw new Error(
-					'Foundry Local service is not running or not accessible. ' +
-					'Please start the service with `foundry local start` command. ' +
-					'Make sure Foundry Local is installed and properly configured. ' +
-					`Check that the service is running on ${this._foundryBaseUrl}.`
-				);
-			}
-		}
-
-		// If we get here, service responded but not with expected data
-		throw new Error(
-			`Foundry Local service at ${this._foundryBaseUrl} is not responding correctly. ` +
-			'Please check your Foundry Local installation and configuration.'
-		);
-	}
-
-	/**
-	 * Compare version strings to check if current version meets minimum requirements
-	 */
-	private _isVersionSupported(currentVersion: string): boolean {
-		const currentParts = currentVersion.split('.').map(n => parseInt(n, 10));
-		const minimumParts = MINIMUM_FOUNDRY_VERSION.split('.').map(n => parseInt(n, 10));
-
-		for (let i = 0; i < Math.max(currentParts.length, minimumParts.length); i++) {
-			const current = currentParts[i] || 0;
-			const minimum = minimumParts[i] || 0;
-
-			if (current > minimum) {
-				return true;
-			}
-			if (current < minimum) {
-				return false;
-			}
-		}
-
-		return true; // versions are equal
-	}
 }

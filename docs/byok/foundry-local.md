@@ -1,6 +1,12 @@
 # Foundry Local BYOK Provider
 
-The Foundry Local provider enables integration with local Foundry services for BYOK (Bring Your Own Key) scenarios. This provider follows the established patterns for local service providers in the VS Code Copilot Chat extension.
+The Foundry Local provider enables integration with local Foundry services for BYOK (Bring Your Own Key) scenarios. This provider uses the official `foundry-local-sdk` to interact with Foundry Local services, ensuring compatibility and proper service management.
+
+## Prerequisites
+
+- Foundry Local must be installed and available in your system PATH
+- For Node.js environments: The SDK can auto-discover running services
+- For browser environments: You must specify the service URL
 
 ## Configuration
 
@@ -12,88 +18,104 @@ The provider can be configured through the VS Code setting:
 }
 ```
 
-## Expected API Endpoints
+If no endpoint is specified, the provider will use the SDK's auto-discovery feature (Node.js only).
 
-The Foundry Local provider expects the service to implement the following REST API endpoints:
+## SDK Integration
 
-### Health Check Endpoints
+This provider integrates with Foundry Local using the official `foundry-local-sdk` package:
 
-The provider will attempt to verify service availability using these endpoints (in order):
+### Automatic Service Management
 
-1. `GET /health` - Primary health check endpoint
-   - Expected response: `{ "status": "ok" | "healthy", "version"?: string }`
+The SDK handles:
+- Service discovery and connectivity
+- Model catalog management  
+- Authentication with local services
+- OpenAI-compatible endpoint exposure
 
-2. `GET /v1/models` - Fallback health check via models endpoint
-   - Used if health endpoint is not available
+### Model Operations
 
-### Model Endpoints
+The provider supports:
+- **Model Discovery**: Lists available models from the Foundry Local catalog
+- **Model Information**: Retrieves detailed model metadata including capabilities
+- **Model Management**: Leverages SDK for model loading and lifecycle management
 
-1. `GET /v1/models` - List available models (OpenAI-compatible)
-   ```json
-   {
-     "object": "list",
-     "data": [
-       {
-         "id": "model-id",
-         "object": "model",
-         "owned_by": "foundry-local"
-       }
-     ]
-   }
-   ```
+## Usage Patterns
 
-2. `GET /api/models/{modelId}` - Get detailed model information (optional)
-   ```json
-   {
-     "id": "model-id",
-     "name": "Model Display Name",
-     "description": "Model description",
-     "capabilities": ["tools", "vision"],
-     "context_length": 4096,
-     "max_tokens": 2048
-   }
-   ```
+### Node.js Environment (Auto-discovery)
+```typescript
+// Uses FoundryLocalManager with auto-discovery
+const provider = new FoundryLocalLMProvider(
+  undefined, // Auto-discover service
+  // ... other dependencies
+);
+```
 
-### Chat Completions
+### Browser Environment (Explicit URL)
+```typescript
+// Uses browser-compatible SDK with explicit service URL
+const provider = new FoundryLocalLMProvider(
+  "http://localhost:5273", // Explicit service URL
+  // ... other dependencies
+);
+```
 
-1. `POST /v1/chat/completions` - OpenAI-compatible chat completions endpoint
-   - Should accept standard OpenAI chat completion requests
-   - Used for actual chat interactions
+## Expected Service Capabilities
 
-## Capabilities Detection
+The Foundry Local service should provide:
+- **Model Catalog**: Access to available AI models via SDK
+- **Model Metadata**: Detailed information about model capabilities and specifications  
+- **OpenAI-compatible API**: Inference endpoints that work with OpenAI client libraries
+- **Service Management**: Proper lifecycle management through the SDK
 
-The provider infers model capabilities using the following logic:
+### Model Capabilities
 
-- **Tool Calling**: Detected if model capabilities include `"tools"`, `"function_calling"`, or `"tool_calling"`
-- **Vision**: Detected if model capabilities include `"vision"` or model name contains "vision"
-- **Context Window**: Uses `context_length` from model details, defaults to 4096 tokens
-- **Max Output**: Uses `max_tokens` from model details, defaults to half of context window
+The provider detects and maps model capabilities:
+
+- **Tool Calling**: Inferred from model information and metadata
+- **Vision**: Detected based on model task type (multimodal, vision) or name patterns
+- **Context Length**: Uses SDK-provided model specifications with conservative defaults
+- **Model Aliases**: Supports human-readable model names through SDK aliases
+
+## Installation and Setup
+
+1. **Install Foundry Local**: Follow the Foundry Local installation guide
+2. **Start Service**: Run `foundry local start` to start the service  
+3. **Configure VS Code**: Set the endpoint URL if needed (optional for Node.js environments)
+4. **Select Models**: Choose from available models in the Foundry Local catalog
 
 ## Error Handling
 
-The provider provides clear error messages for common issues:
+The provider provides clear error messages for common scenarios:
 
-- Service not running: Suggests using `foundry local start`
-- Configuration problems: Points to endpoint configuration
-- Model availability: Graceful fallback for missing model details
+- **Service Connectivity**: Automatic detection of service availability through SDK
+- **Model Discovery**: Graceful handling when models are not found in catalog
+- **SDK Integration**: Proper error mapping from SDK exceptions to user-friendly messages
 
 ## Authentication
 
-This provider uses `BYOKAuthType.None`, meaning no API key is required for authentication. This is appropriate for local services.
+This provider uses `BYOKAuthType.None` since local Foundry services typically don't require API keys. The SDK handles any necessary authentication tokens automatically.
 
 ## Implementation Notes
 
-- The provider extends `BaseOpenAICompatibleLMProvider` for consistent behavior
-- Uses direct REST API calls via `IFetcherService` instead of external SDKs
-- Implements caching for model information to improve performance
-- Follows the same patterns as other local service providers (e.g., Ollama)
+- Uses the official `foundry-local-sdk` for all service interactions
+- Extends `BaseOpenAICompatibleLMProvider` for consistent chat completion behavior  
+- Supports both Node.js (auto-discovery) and browser (explicit URL) environments
+- Caches model information for improved performance
+- Follows established patterns from other BYOK providers in the codebase
 
-## Development
+## Troubleshooting
 
-When extending or modifying this provider:
+### Service Not Found
+- Ensure Foundry Local is installed and in your PATH
+- Try running `foundry local start` manually
+- Check that the service is running on the expected port
 
-1. Follow the established patterns from other BYOK providers
-2. Use the `_fetcherService` for all HTTP requests
-3. Implement proper error handling with actionable error messages
-4. Cache model information when possible
-5. Provide graceful fallbacks for optional endpoints
+### Models Not Available  
+- Verify models are available in the catalog: `foundry model list`
+- Check that models are downloaded and ready for use
+- Ensure the SDK can access the model catalog
+
+### Connectivity Issues
+- For browser environments, ensure the correct service URL is configured
+- Check firewall settings if using custom ports
+- Verify the service is accessible from your environment

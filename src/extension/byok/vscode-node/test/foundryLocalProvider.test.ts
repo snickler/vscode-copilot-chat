@@ -9,13 +9,25 @@ import { ILogService } from '../../../../platform/log/common/logService';
 import { IInstantiationService } from '../../../../util/vs/platform/instantiation/common/instantiation';
 import { IBYOKStorageService } from '../byokStorageService';
 
-// Mock interfaces
-interface MockResponse {
-	ok: boolean;
-	status: number;
-	statusText: string;
-	json: () => Promise<any>;
-}
+// Mock the foundry-local-sdk
+vi.mock('foundry-local-sdk', () => ({
+	FoundryLocalManager: vi.fn().mockImplementation((options?: any) => ({
+		endpoint: options?.serviceUrl ? `${options.serviceUrl}/v1` : 'http://localhost:5273/v1',
+		apiKey: 'foundry-local',
+		listCatalogModels: vi.fn(),
+		getModelInfo: vi.fn()
+	}))
+}));
+
+// Mock the browser version
+vi.mock('foundry-local-sdk/browser', () => ({
+	FoundryLocalManager: vi.fn().mockImplementation((options: any) => ({
+		endpoint: `${options.serviceUrl}/v1`,
+		apiKey: 'foundry-local',
+		listCatalogModels: vi.fn(),
+		getModelInfo: vi.fn()
+	}))
+}));
 
 describe('FoundryLocalLMProvider', () => {
 	let provider: FoundryLocalLMProvider;
@@ -43,167 +55,199 @@ describe('FoundryLocalLMProvider', () => {
 		};
 
 		mockStorageService = {};
-
-		provider = new FoundryLocalLMProvider(
-			undefined, // Use default URL
-			mockStorageService as IBYOKStorageService,
-			mockFetcherService as IFetcherService,
-			mockLogService as ILogService,
-			mockInstantiationService as IInstantiationService
-		);
 	});
 
 	describe('constructor', () => {
-		it('should use default URL when none provided', () => {
+		it('should use Node.js SDK when no URL provided', () => {
+			provider = new FoundryLocalLMProvider(
+				undefined, // Use default/auto-discovery
+				mockStorageService as IBYOKStorageService,
+				mockFetcherService as IFetcherService,
+				mockLogService as ILogService,
+				mockInstantiationService as IInstantiationService
+			);
+			
 			expect(provider).toBeDefined();
 			expect(FoundryLocalLMProvider.providerName).toBe('FoundryLocal');
 		});
 
-		it('should use provided URL', () => {
+		it('should use browser SDK when URL provided', () => {
 			const customUrl = 'http://custom-host:8080';
-			const customProvider = new FoundryLocalLMProvider(
+			provider = new FoundryLocalLMProvider(
 				customUrl,
 				mockStorageService as IBYOKStorageService,
 				mockFetcherService as IFetcherService,
 				mockLogService as ILogService,
 				mockInstantiationService as IInstantiationService
 			);
-			expect(customProvider).toBeDefined();
+			
+			expect(provider).toBeDefined();
 		});
 	});
 
-	describe('_checkFoundryService', () => {
-		it('should succeed when health endpoint returns ok', async () => {
-			const healthResponse: MockResponse = {
-				ok: true,
-				status: 200,
-				statusText: 'OK',
-				json: async () => ({ status: 'ok', version: '1.2.0' })
-			};
-			mockFetch.mockResolvedValueOnce(healthResponse);
-
-			// Access the private method for testing
-			const checkService = (provider as any)._checkFoundryService.bind(provider);
-			await expect(checkService()).resolves.not.toThrow();
+	describe('getModelInfo', () => {
+		beforeEach(() => {
+			provider = new FoundryLocalLMProvider(
+				undefined,
+				mockStorageService as IBYOKStorageService,
+				mockFetcherService as IFetcherService,
+				mockLogService as ILogService,
+				mockInstantiationService as IInstantiationService
+			);
 		});
 
-		it('should fallback to models endpoint when health fails', async () => {
-			// Health endpoint fails
-			const healthError = new Error('Health endpoint not found');
-			const modelsResponse: MockResponse = {
-				ok: true,
-				status: 200,
-				statusText: 'OK',
-				json: async () => ({ object: 'list', data: [] })
+		it('should get model info from SDK and cache it', async () => {
+			const mockModelInfo = {
+				id: 'test-model-id',
+				alias: 'test-model',
+				version: '1.0.0',
+				task: 'chat',
+				modelSize: 1024,
+				uri: 'test-uri',
+				runtime: 'CPU',
+				promptTemplate: {},
+				provider: 'test',
+				publisher: 'test',
+				license: 'MIT'
 			};
-			
-			mockFetch
-				.mockRejectedValueOnce(healthError)
-				.mockResolvedValueOnce(modelsResponse);
 
-			const checkService = (provider as any)._checkFoundryService.bind(provider);
-			await expect(checkService()).resolves.not.toThrow();
-		});
+			// Mock the SDK's getModelInfo method
+			const mockFoundryManager = (provider as any)._foundryManager;
+			mockFoundryManager.getModelInfo = vi.fn().mockResolvedValue(mockModelInfo);
 
-		it('should throw error when both endpoints fail', async () => {
-			const error = new Error('Connection refused');
-			mockFetch.mockRejectedValue(error);
-
-			const checkService = (provider as any)._checkFoundryService.bind(provider);
-			await expect(checkService()).rejects.toThrow('Foundry Local service is not running');
-		});
-	});
-
-	describe('_getFoundryModelDetails', () => {
-		it('should return model details when endpoint succeeds', async () => {
-			const modelDetails = {
-				id: 'test-model',
-				name: 'Test Model',
-				capabilities: ['tools'],
-				context_length: 8192,
-				max_tokens: 4096
-			};
-			
-			const response: MockResponse = {
-				ok: true,
-				status: 200,
-				statusText: 'OK',
-				json: async () => modelDetails
-			};
-			mockFetch.mockResolvedValueOnce(response);
-
-			const getDetails = (provider as any)._getFoundryModelDetails.bind(provider);
-			const result = await getDetails('test-model');
-
-			expect(result).toEqual(modelDetails);
-		});
-
-		it('should return fallback details when all endpoints fail', async () => {
-			mockFetch.mockRejectedValue(new Error('Not found'));
-
-			const getDetails = (provider as any)._getFoundryModelDetails.bind(provider);
-			const result = await getDetails('test-model');
-
-			expect(result).toEqual({
-				id: 'test-model',
+			// Mock the super.getModelInfo method
+			const mockSuperGetModelInfo = vi.fn().mockResolvedValue({
 				name: 'test-model',
-				context_length: 4096,
-				max_tokens: 2048,
-				capabilities: []
+				capabilities: {
+					limits: {
+						max_prompt_tokens: 4096,
+						max_output_tokens: 2048
+					},
+					supports: {
+						tool_calls: true,
+						vision: false
+					}
+				}
 			});
+			Object.setPrototypeOf(provider, {
+				...Object.getPrototypeOf(provider),
+				getModelInfo: mockSuperGetModelInfo
+			});
+
+			const result = await provider.getModelInfo('test-model-id', '');
+
+			expect(mockFoundryManager.getModelInfo).toHaveBeenCalledWith('test-model-id');
+			expect(result).toBeDefined();
+		});
+
+		it('should handle model not found error', async () => {
+			const mockFoundryManager = (provider as any)._foundryManager;
+			mockFoundryManager.getModelInfo = vi.fn().mockResolvedValue(null);
+
+			await expect(provider.getModelInfo('nonexistent-model', '')).rejects.toThrow(
+				'Unable to get information for model "nonexistent-model"'
+			);
 		});
 	});
 
 	describe('getAllModels', () => {
-		it('should handle empty models response gracefully', async () => {
-			// Mock health check
-			const healthResponse: MockResponse = {
-				ok: true,
-				status: 200,
-				statusText: 'OK',
-				json: async () => ({ status: 'ok' })
-			};
-			
-			// Mock models response
-			const modelsResponse: MockResponse = {
-				ok: true,
-				status: 200,
-				statusText: 'OK',
-				json: async () => ({ object: 'list', data: [] })
-			};
-
-			mockFetch
-				.mockResolvedValueOnce(healthResponse)
-				.mockResolvedValueOnce(modelsResponse);
-
-			const result = await provider.getAllModels();
-			expect(result).toEqual({});
+		beforeEach(() => {
+			provider = new FoundryLocalLMProvider(
+				undefined,
+				mockStorageService as IBYOKStorageService,
+				mockFetcherService as IFetcherService,
+				mockLogService as ILogService,
+				mockInstantiationService as IInstantiationService
+			);
 		});
 
-		it('should handle invalid models response format', async () => {
-			// Mock health check
-			const healthResponse: MockResponse = {
-				ok: true,
-				status: 200,
-				statusText: 'OK',
-				json: async () => ({ status: 'ok' })
-			};
-			
-			// Mock invalid models response
-			const modelsResponse: MockResponse = {
-				ok: true,
-				status: 200,
-				statusText: 'OK',
-				json: async () => ({ invalid: 'format' })
-			};
+		it('should return models from SDK catalog', async () => {
+			const mockCatalogModels = [
+				{
+					id: 'model1',
+					alias: 'Model 1',
+					version: '1.0.0',
+					task: 'chat',
+					modelSize: 1024,
+					uri: 'uri1',
+					runtime: 'CPU',
+					promptTemplate: {},
+					provider: 'test',
+					publisher: 'test',
+					license: 'MIT'
+				},
+				{
+					id: 'model2',
+					alias: 'Model 2',
+					version: '1.0.0',
+					task: 'vision',
+					modelSize: 2048,
+					uri: 'uri2',
+					runtime: 'GPU',
+					promptTemplate: {},
+					provider: 'test',
+					publisher: 'test',
+					license: 'MIT'
+				}
+			];
 
-			mockFetch
-				.mockResolvedValueOnce(healthResponse)
-				.mockResolvedValueOnce(modelsResponse);
+			const mockFoundryManager = (provider as any)._foundryManager;
+			mockFoundryManager.listCatalogModels = vi.fn().mockResolvedValue(mockCatalogModels);
+
+			// Mock getModelInfo for each model
+			const mockGetModelInfo = vi.fn();
+			mockGetModelInfo.mockResolvedValueOnce({
+				capabilities: {
+					limits: { max_prompt_tokens: 4096, max_output_tokens: 2048 },
+					supports: { tool_calls: true, vision: false }
+				}
+			});
+			mockGetModelInfo.mockResolvedValueOnce({
+				capabilities: {
+					limits: { max_prompt_tokens: 8192, max_output_tokens: 4096 },
+					supports: { tool_calls: false, vision: true }
+				}
+			});
+			provider.getModelInfo = mockGetModelInfo;
 
 			const result = await provider.getAllModels();
+
+			expect(mockFoundryManager.listCatalogModels).toHaveBeenCalled();
+			expect(result).toEqual({
+				'model1': {
+					maxInputTokens: 4096,
+					maxOutputTokens: 2048,
+					name: 'Model 1',
+					toolCalling: true,
+					vision: false
+				},
+				'model2': {
+					maxInputTokens: 8192,
+					maxOutputTokens: 4096,
+					name: 'Model 2',
+					toolCalling: false,
+					vision: true
+				}
+			});
+		});
+
+		it('should handle empty catalog gracefully', async () => {
+			const mockFoundryManager = (provider as any)._foundryManager;
+			mockFoundryManager.listCatalogModels = vi.fn().mockResolvedValue([]);
+
+			const result = await provider.getAllModels();
+
 			expect(result).toEqual({});
-			expect(mockLogService.warn).toHaveBeenCalledWith('Invalid models response format from Foundry Local service');
+			expect(mockLogService.warn).toHaveBeenCalledWith('No models found in Foundry Local catalog');
+		});
+
+		it('should handle SDK errors gracefully', async () => {
+			const mockFoundryManager = (provider as any)._foundryManager;
+			mockFoundryManager.listCatalogModels = vi.fn().mockRejectedValue(new Error('fetch failed'));
+
+			await expect(provider.getAllModels()).rejects.toThrow(
+				'Unable to connect to Foundry Local service'
+			);
 		});
 	});
 });

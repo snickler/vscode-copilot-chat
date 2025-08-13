@@ -3,7 +3,6 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 import type { CancellationToken } from 'vscode';
-import { AsyncIterableObject } from '../../../util/vs/base/common/async';
 import { IAuthenticationService } from '../../../platform/authentication/common/authentication';
 import { IChatMLFetcher } from '../../../platform/chat/common/chatMLFetcher';
 import { ICAPIClientService } from '../../../platform/endpoint/common/capiClient';
@@ -18,6 +17,7 @@ import { ITelemetryService } from '../../../platform/telemetry/common/telemetry'
 import { TelemetryData } from '../../../platform/telemetry/common/telemetryData';
 import { IThinkingDataService } from '../../../platform/thinking/node/thinkingDataService';
 import { ITokenizerProvider } from '../../../platform/tokenizer/node/tokenizer';
+import { AsyncIterableObject } from '../../../util/vs/base/common/async';
 import { IInstantiationService } from '../../../util/vs/platform/instantiation/common/instantiation';
 import { OpenAIEndpoint } from './openAIEndpoint';
 
@@ -59,7 +59,7 @@ export class FoundryLocalEndpoint extends OpenAIEndpoint {
 			instantiationService,
 			thinkingDataService
 		);
-		
+
 		this._logService.info(`[FoundryLocal] Created FoundryLocalEndpoint with URL: ${_modelUrl}`);
 	}
 
@@ -78,11 +78,11 @@ export class FoundryLocalEndpoint extends OpenAIEndpoint {
 		// Check if this is a Foundry Local endpoint
 		if (this._isFoundryLocalEndpoint()) {
 			this._logService.info('[FoundryLocal] Detected Foundry Local endpoint, applying stream transformation');
-			
+
 			try {
 				// Transform the response to remove duplicate message fields
 				const transformedResponse = this._createTransformedResponse(response);
-				
+
 				// Call parent with transformed response
 				return super.processResponseFromChatEndpoint(
 					telemetryService,
@@ -126,7 +126,7 @@ export class FoundryLocalEndpoint extends OpenAIEndpoint {
 	private _isFoundryLocalEndpoint(): boolean {
 		try {
 			const url = this.urlOrRequestMetadata as string;
-			const isFoundryLocal = url && url.includes('localhost:5273');
+			const isFoundryLocal = !!(url && url.includes('localhost:5273'));
 			this._logService.info(`[FoundryLocal] Checking URL: ${url}, isFoundryLocal: ${isFoundryLocal}`);
 			return isFoundryLocal;
 		} catch (error) {
@@ -140,25 +140,28 @@ export class FoundryLocalEndpoint extends OpenAIEndpoint {
 	 */
 	private _createTransformedResponse(originalResponse: Response): Response {
 		this._logService.info('[FoundryLocal] Creating transformed response');
-		
-		// Create a proxy response that intercepts the body() method
-		const transformedResponse: Response = {
-			...originalResponse,
-			body: async () => {
-				this._logService.info('[FoundryLocal] Getting response body for transformation');
-				const originalStream = await originalResponse.body();
-				
-				if (!originalStream || typeof originalStream === 'string') {
-					this._logService.warn('[FoundryLocal] Response body is not a stream, returning as-is');
-					return originalStream;
+
+		// Create a proxy that only overrides the body method while preserving
+		// private methods and original behavior
+		return new Proxy(originalResponse, {
+			get: (target, prop) => {
+				if (prop === 'body') {
+					return async () => {
+						this._logService.info('[FoundryLocal] Getting response body for transformation');
+						const originalStream = await originalResponse.body();
+
+						if (!originalStream || typeof originalStream === 'string') {
+							this._logService.warn('[FoundryLocal] Response body is not a stream, returning as-is');
+							return originalStream;
+						}
+
+						// Transform the stream
+						return this._transformStream(originalStream as NodeJS.ReadableStream);
+					};
 				}
-
-				// Transform the stream
-				return this._transformStream(originalStream as NodeJS.ReadableStream);
+				return Reflect.get(target, prop);
 			}
-		};
-
-		return transformedResponse;
+		});
 	}
 
 	/**
@@ -166,65 +169,66 @@ export class FoundryLocalEndpoint extends OpenAIEndpoint {
 	 */
 	private _transformStream(originalStream: NodeJS.ReadableStream): NodeJS.ReadableStream {
 		this._logService.info('[FoundryLocal] Starting stream transformation');
-		
+
 		// Import Transform stream from Node.js
 		const { Transform } = require('stream');
-		
+
 		let buffer = '';
-		
+
+		const self = this;
 		const transformStream = new Transform({
-			transform(chunk: Buffer, encoding: string, callback: Function) {
+			transform: (chunk: Buffer, callback: Function) => {
 				try {
 					buffer += chunk.toString();
 					const lines = buffer.split('\n');
-					
+
 					// Keep the last potentially incomplete line in buffer
 					buffer = lines.pop() || '';
-					
+
 					let transformedOutput = '';
-					
+
 					for (const line of lines) {
-						const transformedLine = this._transformLine(line);
+						const transformedLine = self._transformLine(line);
 						if (transformedLine !== null) {
 							transformedOutput += transformedLine + '\n';
 						}
 					}
-					
+
 					if (transformedOutput) {
-						this.push(transformedOutput);
+						(transformStream as any).push(transformedOutput);
 					}
-					
+
 					callback();
 				} catch (error) {
-					this._logService.error(`[FoundryLocal] Stream transform error: ${error}`);
+					self._logService.error(`[FoundryLocal] Stream transform error: ${error}`);
 					// Pass through original chunk on error
-					this.push(chunk);
+					(transformStream as any).push(chunk);
 					callback();
 				}
-			}.bind(this),
-			
-			flush(callback: Function) {
+			},
+
+			flush: (callback: Function) => {
 				try {
 					// Process any remaining buffer content
 					if (buffer.trim()) {
-						const transformedLine = this._transformLine(buffer);
+						const transformedLine = self._transformLine(buffer);
 						if (transformedLine !== null) {
-							this.push(transformedLine + '\n');
+							(transformStream as any).push(transformedLine + '\n');
 						}
 					}
-					
-					this._logService.info('[FoundryLocal] Stream transformation completed');
+
+					self._logService.info('[FoundryLocal] Stream transformation completed');
 					callback();
 				} catch (error) {
-					this._logService.error(`[FoundryLocal] Stream flush error: ${error}`);
+					self._logService.error(`[FoundryLocal] Stream flush error: ${error}`);
 					callback();
 				}
-			}.bind(this)
+			}
 		});
 
 		// Pipe the original stream through our transform
 		originalStream.pipe(transformStream);
-		
+
 		// Handle errors
 		originalStream.on('error', (error) => {
 			this._logService.error(`[FoundryLocal] Original stream error: ${error}`);
@@ -239,7 +243,7 @@ export class FoundryLocalEndpoint extends OpenAIEndpoint {
 	 */
 	private _transformLine(line: string): string | null {
 		const trimmedLine = line.trim();
-		
+
 		// Pass through non-data lines unchanged
 		if (!trimmedLine.startsWith('data: ')) {
 			return trimmedLine;
@@ -253,18 +257,18 @@ export class FoundryLocalEndpoint extends OpenAIEndpoint {
 
 		// Extract JSON from data line
 		const jsonPart = trimmedLine.substring(6); // Remove 'data: ' prefix
-		
+
 		if (!jsonPart || jsonPart === '[DONE]') {
 			return trimmedLine;
 		}
 
 		try {
 			const data = JSON.parse(jsonPart);
-			
+
 			// Transform choices if they exist
 			if (data.choices && Array.isArray(data.choices)) {
 				let hasTransformation = false;
-				
+
 				data.choices = data.choices.map((choice: any, index: number) => {
 					// Check if this choice has both delta and message (Foundry Local format)
 					if (choice.delta && choice.message) {
@@ -275,7 +279,7 @@ export class FoundryLocalEndpoint extends OpenAIEndpoint {
 					}
 					return choice;
 				});
-				
+
 				if (hasTransformation) {
 					this._logService.debug('[FoundryLocal] Applied transformation to remove duplicate message fields');
 				}

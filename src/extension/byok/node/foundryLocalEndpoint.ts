@@ -81,7 +81,7 @@ export class FoundryLocalEndpoint extends OpenAIEndpoint {
 
 			try {
 				// Transform the response to remove duplicate message fields
-				const transformedResponse = this._createTransformedResponse(response);
+				const transformedResponse = await this._createTransformedResponse(response);
 
 				// Call parent with transformed response
 				return super.processResponseFromChatEndpoint(
@@ -137,105 +137,78 @@ export class FoundryLocalEndpoint extends OpenAIEndpoint {
 
 	/**
 	 * Create a transformed response that removes duplicate message fields
+	 * Simplified approach: read the entire stream and do string transformations
 	 */
-	private _createTransformedResponse(originalResponse: Response): Response {
-		this._logService.info('[FoundryLocal] Creating transformed response');
+	private async _createTransformedResponse(originalResponse: Response): Promise<Response> {
+		this._logService.info('[FoundryLocal] Creating simplified transformed response');
 
-		// Create a proxy that only overrides the body method while preserving
-		// private methods and original behavior
-		return new Proxy(originalResponse, {
-			get: (target, prop) => {
-				if (prop === 'body') {
-					return async () => {
-						this._logService.info('[FoundryLocal] Getting response body for transformation');
-						const originalStream = await originalResponse.body();
+		try {
+			// Get the original response body
+			const originalBody = await originalResponse.body();
 
-						if (!originalStream || typeof originalStream === 'string') {
-							this._logService.warn('[FoundryLocal] Response body is not a stream, returning as-is');
-							return originalStream;
-						}
+			let transformedBodyString: string;
 
-						// Transform the stream
-						return this._transformStream(originalStream as NodeJS.ReadableStream);
-					};
+			if (typeof originalBody === 'string') {
+				// If it's already a string, transform it directly
+				transformedBodyString = this._transformResponseBody(originalBody);
+			} else if (originalBody && typeof originalBody === 'object' && 'read' in originalBody) {
+				// If it's a stream, read it all and transform
+				const chunks: Buffer[] = [];
+				for await (const chunk of originalBody as any) {
+					chunks.push(chunk);
 				}
-				return Reflect.get(target, prop);
+				const bodyString = Buffer.concat(chunks).toString();
+				transformedBodyString = this._transformResponseBody(bodyString);
+			} else {
+				this._logService.warn('[FoundryLocal] Unexpected body type, returning original');
+				return originalResponse;
 			}
-		});
+
+			// Create a new response with the transformed body
+			return this._createResponseWithBody(originalResponse, transformedBodyString);
+		} catch (error) {
+			this._logService.error(`[FoundryLocal] Error creating transformed response: ${error}`);
+			throw error;
+		}
 	}
 
 	/**
-	 * Transform the stream to remove duplicate message fields
+	 * Transform the response body string to remove duplicate message fields
 	 */
-	private _transformStream(originalStream: NodeJS.ReadableStream): NodeJS.ReadableStream {
-		this._logService.info('[FoundryLocal] Starting stream transformation');
+	private _transformResponseBody(bodyString: string): string {
+		this._logService.info('[FoundryLocal] Transforming response body');
 
-		// Import Transform stream from Node.js
-		const { Transform } = require('stream');
+		const lines = bodyString.split('\n');
+		const transformedLines: string[] = [];
 
-		let buffer = '';
-
-		const self = this;
-		const transformStream = new Transform({
-			transform: (chunk: Buffer, callback: Function) => {
-				try {
-					buffer += chunk.toString();
-					const lines = buffer.split('\n');
-
-					// Keep the last potentially incomplete line in buffer
-					buffer = lines.pop() || '';
-
-					let transformedOutput = '';
-
-					for (const line of lines) {
-						const transformedLine = self._transformLine(line);
-						if (transformedLine !== null) {
-							transformedOutput += transformedLine + '\n';
-						}
-					}
-
-					if (transformedOutput) {
-						(transformStream as any).push(transformedOutput);
-					}
-
-					callback();
-				} catch (error) {
-					self._logService.error(`[FoundryLocal] Stream transform error: ${error}`);
-					// Pass through original chunk on error
-					(transformStream as any).push(chunk);
-					callback();
-				}
-			},
-
-			flush: (callback: Function) => {
-				try {
-					// Process any remaining buffer content
-					if (buffer.trim()) {
-						const transformedLine = self._transformLine(buffer);
-						if (transformedLine !== null) {
-							(transformStream as any).push(transformedLine + '\n');
-						}
-					}
-
-					self._logService.info('[FoundryLocal] Stream transformation completed');
-					callback();
-				} catch (error) {
-					self._logService.error(`[FoundryLocal] Stream flush error: ${error}`);
-					callback();
-				}
+		for (const line of lines) {
+			const transformedLine = this._transformLine(line);
+			if (transformedLine !== null) {
+				transformedLines.push(transformedLine);
 			}
-		});
+		}
 
-		// Pipe the original stream through our transform
-		originalStream.pipe(transformStream);
+		const result = transformedLines.join('\n');
+		this._logService.info(`[FoundryLocal] Transformed ${lines.length} lines to ${transformedLines.length} lines`);
+		return result;
+	}
 
-		// Handle errors
-		originalStream.on('error', (error) => {
-			this._logService.error(`[FoundryLocal] Original stream error: ${error}`);
-			transformStream.destroy(error);
-		});
+	/**
+	 * Create a new Response object with the transformed body
+	 */
+	private _createResponseWithBody(originalResponse: Response, transformedBody: string): Response {
+		// Create a mock response that mimics the original but with transformed body
+		const mockResponse = {
+			ok: originalResponse.ok,
+			status: originalResponse.status,
+			statusText: originalResponse.statusText,
+			headers: originalResponse.headers,
+			body: async () => transformedBody,
+			json: async () => JSON.parse(transformedBody),
+			text: async () => transformedBody
+		};
 
-		return transformStream;
+		return mockResponse as Response;
 	}
 
 	/**
@@ -251,7 +224,7 @@ export class FoundryLocalEndpoint extends OpenAIEndpoint {
 
 		// Handle [DONE] marker
 		if (trimmedLine === 'data: [DONE]') {
-			this._logService.info('[FoundryLocal] Found stream end marker');
+			this._logService.debug('[FoundryLocal] Found stream end marker');
 			return trimmedLine;
 		}
 

@@ -277,16 +277,23 @@ export class FoundryLocalLMProvider extends BaseOpenAICompatibleLMProvider {
 		token: CancellationToken
 	): Promise<any> {
 		this._logService.info(`[FoundryLocal] Starting chat response for model: ${model.id}`);
+		this._logService.info(`[FoundryLocal] Using baseUrl: ${this._localBaseUrl}`);
 		
 		try {
 			const modelInfo: IChatModelInformation = await this.getModelInfo(model.id, this._localApiKey || '');
+			this._logService.info(`[FoundryLocal] Got model info for: ${model.id}`);
+			
+			const endpointUrl = `${this._localBaseUrl}/chat/completions`;
+			this._logService.info(`[FoundryLocal] Creating FoundryLocalEndpoint with URL: ${endpointUrl}`);
 			
 			const foundryLocalEndpoint = this._localInstantiationService.createInstance(
 				FoundryLocalEndpoint, 
 				modelInfo, 
 				this._localApiKey || '', 
-				`${this._localBaseUrl}/chat/completions`
+				endpointUrl
 			);
+			
+			this._logService.info('[FoundryLocal] Created FoundryLocalEndpoint, calling wrapper...');
 			
 			return this._localLmWrapper.provideLanguageModelResponse(foundryLocalEndpoint, messages, options, options.extensionId, progress, token);
 		} catch (error) {

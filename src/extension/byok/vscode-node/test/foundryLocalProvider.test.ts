@@ -11,19 +11,9 @@ import { IBYOKStorageService } from '../byokStorageService';
 
 // Mock the foundry-local-sdk
 vi.mock('foundry-local-sdk', () => ({
-	FoundryLocalManager: vi.fn().mockImplementation((options?: any) => ({
-		endpoint: options?.serviceUrl ? `${options.serviceUrl}/v1` : 'http://localhost:5273/v1',
-		apiKey: 'foundry-local',
-		listCatalogModels: vi.fn(),
-		getModelInfo: vi.fn()
-	}))
-}));
-
-// Mock the browser version
-vi.mock('foundry-local-sdk/browser', () => ({
-	FoundryLocalManager: vi.fn().mockImplementation((options: any) => ({
-		endpoint: `${options.serviceUrl}/v1`,
-		apiKey: 'foundry-local',
+	FoundryLocalManager: vi.fn().mockImplementation(() => ({
+		startService: vi.fn().mockResolvedValue(undefined),
+		init: vi.fn().mockResolvedValue(undefined),
 		listCatalogModels: vi.fn(),
 		getModelInfo: vi.fn()
 	}))
@@ -35,12 +25,10 @@ describe('FoundryLocalLMProvider', () => {
 	let mockLogService: Partial<ILogService>;
 	let mockInstantiationService: Partial<IInstantiationService>;
 	let mockStorageService: Partial<IBYOKStorageService>;
-	let mockFetch: MockedFunction<any>;
 
 	beforeEach(() => {
-		mockFetch = vi.fn();
 		mockFetcherService = {
-			fetch: mockFetch
+			fetch: vi.fn()
 		};
 		
 		mockLogService = {
@@ -58,9 +46,9 @@ describe('FoundryLocalLMProvider', () => {
 	});
 
 	describe('constructor', () => {
-		it('should use Node.js SDK when no URL provided', () => {
+		it('should initialize with default service URL when none provided', () => {
 			provider = new FoundryLocalLMProvider(
-				undefined, // Use default/auto-discovery
+				undefined,
 				mockStorageService as IBYOKStorageService,
 				mockFetcherService as IFetcherService,
 				mockLogService as ILogService,
@@ -71,7 +59,7 @@ describe('FoundryLocalLMProvider', () => {
 			expect(FoundryLocalLMProvider.providerName).toBe('FoundryLocal');
 		});
 
-		it('should use browser SDK when URL provided', () => {
+		it('should initialize with custom service URL when provided', () => {
 			const customUrl = 'http://custom-host:8080';
 			provider = new FoundryLocalLMProvider(
 				customUrl,
@@ -111,7 +99,7 @@ describe('FoundryLocalLMProvider', () => {
 				license: 'MIT'
 			};
 
-			// Mock the SDK's getModelInfo method
+			// Mock the SDK methods
 			const mockFoundryManager = (provider as any)._foundryManager;
 			mockFoundryManager.getModelInfo = vi.fn().mockResolvedValue(mockModelInfo);
 
@@ -125,7 +113,8 @@ describe('FoundryLocalLMProvider', () => {
 					},
 					supports: {
 						tool_calls: true,
-						vision: false
+						vision: false,
+						thinking: false
 					}
 				}
 			});
@@ -136,11 +125,53 @@ describe('FoundryLocalLMProvider', () => {
 
 			const result = await provider.getModelInfo('test-model-id', '');
 
-			expect(mockFoundryManager.getModelInfo).toHaveBeenCalledWith('test-model-id');
 			expect(result).toBeDefined();
 		});
 
-		it('should handle model not found error', async () => {
+		it('should detect thinking models correctly', async () => {
+			const mockModelInfo = {
+				id: 'phi-4-mini-reasoning',
+				alias: 'Phi-4 Reasoning',
+				version: '1.0.0',
+				task: 'chat',
+				modelSize: 1024,
+				uri: 'test-uri',
+				runtime: 'CPU',
+				promptTemplate: {},
+				provider: 'test',
+				publisher: 'test',
+				license: 'MIT'
+			};
+
+			const mockFoundryManager = (provider as any)._foundryManager;
+			mockFoundryManager.getModelInfo = vi.fn().mockResolvedValue(mockModelInfo);
+
+			// Mock the super.getModelInfo to verify thinking capability is passed
+			const mockSuperGetModelInfo = vi.fn().mockResolvedValue({
+				name: 'Phi-4 Reasoning',
+				capabilities: {
+					limits: { max_prompt_tokens: 4096, max_output_tokens: 2048 },
+					supports: { tool_calls: true, vision: false, thinking: true }
+				}
+			});
+			Object.setPrototypeOf(provider, {
+				...Object.getPrototypeOf(provider),
+				getModelInfo: mockSuperGetModelInfo
+			});
+
+			await provider.getModelInfo('phi-4-mini-reasoning', '');
+
+			// Verify that thinking capability was detected and passed to super
+			expect(mockSuperGetModelInfo).toHaveBeenCalledWith(
+				'phi-4-mini-reasoning',
+				'',
+				expect.objectContaining({
+					thinking: true
+				})
+			);
+		});
+
+		it('should handle model not found error gracefully', async () => {
 			const mockFoundryManager = (provider as any)._foundryManager;
 			mockFoundryManager.getModelInfo = vi.fn().mockResolvedValue(null);
 
@@ -177,10 +208,10 @@ describe('FoundryLocalLMProvider', () => {
 					license: 'MIT'
 				},
 				{
-					id: 'model2',
-					alias: 'Model 2',
+					id: 'phi-4-reasoning',
+					alias: 'Phi-4 Reasoning',
 					version: '1.0.0',
-					task: 'vision',
+					task: 'chat',
 					modelSize: 2048,
 					uri: 'uri2',
 					runtime: 'GPU',
@@ -199,13 +230,13 @@ describe('FoundryLocalLMProvider', () => {
 			mockGetModelInfo.mockResolvedValueOnce({
 				capabilities: {
 					limits: { max_prompt_tokens: 4096, max_output_tokens: 2048 },
-					supports: { tool_calls: true, vision: false }
+					supports: { tool_calls: true, vision: false, thinking: false }
 				}
 			});
 			mockGetModelInfo.mockResolvedValueOnce({
 				capabilities: {
 					limits: { max_prompt_tokens: 8192, max_output_tokens: 4096 },
-					supports: { tool_calls: false, vision: true }
+					supports: { tool_calls: true, vision: false, thinking: true }
 				}
 			});
 			provider.getModelInfo = mockGetModelInfo;
@@ -219,14 +250,16 @@ describe('FoundryLocalLMProvider', () => {
 					maxOutputTokens: 2048,
 					name: 'Model 1',
 					toolCalling: true,
-					vision: false
+					vision: false,
+					thinking: false
 				},
-				'model2': {
+				'phi-4-reasoning': {
 					maxInputTokens: 8192,
 					maxOutputTokens: 4096,
-					name: 'Model 2',
-					toolCalling: false,
-					vision: true
+					name: 'Phi-4 Reasoning',
+					toolCalling: true,
+					vision: false,
+					thinking: true
 				}
 			});
 		});

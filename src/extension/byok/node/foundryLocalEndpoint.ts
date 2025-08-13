@@ -59,12 +59,6 @@ export class FoundryLocalEndpoint extends OpenAIEndpoint {
 			instantiationService,
 			thinkingDataService
 		);
-		
-		this._logService.info(`[FoundryLocal] Created FoundryLocalEndpoint with URL: ${_modelUrl}`);
-		this._logService.info(`[FoundryLocal] Model info: ${JSON.stringify({
-			name: _modelInfo.name,
-			capabilities: _modelInfo.capabilities ? Object.keys(_modelInfo.capabilities) : 'none'
-		})}`);
 	}
 
 	/**
@@ -84,7 +78,6 @@ export class FoundryLocalEndpoint extends OpenAIEndpoint {
 			this._logService.info('[FoundryLocal] Applying streaming format transformation');
 			try {
 				const transformedResponse = await this._transformFoundryLocalStream(response);
-				this._logService.info('[FoundryLocal] Successfully transformed stream, calling super method');
 				
 				return super.processResponseFromChatEndpoint(
 					telemetryService,
@@ -98,7 +91,6 @@ export class FoundryLocalEndpoint extends OpenAIEndpoint {
 			} catch (error) {
 				this._logService.error(`[FoundryLocal] Stream transformation failed: ${error}`);
 				// Fall back to original response if transformation fails
-				this._logService.warn('[FoundryLocal] Falling back to original response processing');
 				return super.processResponseFromChatEndpoint(
 					telemetryService,
 					logService,
@@ -112,7 +104,6 @@ export class FoundryLocalEndpoint extends OpenAIEndpoint {
 		}
 
 		// For non-Foundry Local endpoints, use standard processing
-		this._logService.info('[FoundryLocal] Not a Foundry Local endpoint, using standard processing');
 		return super.processResponseFromChatEndpoint(
 			telemetryService,
 			logService,
@@ -130,12 +121,9 @@ export class FoundryLocalEndpoint extends OpenAIEndpoint {
 	private _isFoundryLocalEndpoint(): boolean {
 		try {
 			const url = this.urlOrRequestMetadata as string;
-			this._logService.info(`[FoundryLocal] Checking URL for Foundry Local: ${url}`);
-			const isFoundryLocal = url && (url.includes('localhost:5273') || url.includes('foundry'));
-			this._logService.info(`[FoundryLocal] Is Foundry Local endpoint: ${isFoundryLocal}`);
-			return isFoundryLocal;
+			return url && url.includes('localhost:5273');
 		} catch (error) {
-			this._logService.warn(`[FoundryLocal] Error checking URL: ${error}`);
+			this._logService.debug(`[FoundryLocal] Error checking URL: ${error}`);
 			return false;
 		}
 	}
@@ -151,7 +139,7 @@ export class FoundryLocalEndpoint extends OpenAIEndpoint {
 			const originalBody = await response.body() as NodeJS.ReadableStream;
 			const { Readable } = await import('stream');
 			
-			// Create a transform stream to fix the format
+			// Create a simpler transform stream
 			const transformedStream = new Readable({
 				read() {
 					// No-op, we'll push data as it comes
@@ -159,56 +147,53 @@ export class FoundryLocalEndpoint extends OpenAIEndpoint {
 			});
 
 			let buffer = '';
-			let chunkCount = 0;
 			originalBody.setEncoding('utf8');
 			
 			originalBody.on('data', (chunk: string) => {
-				try {
-					chunkCount++;
-					this._logService.trace(`[FoundryLocal] Processing chunk ${chunkCount}: ${chunk.substring(0, 100)}...`);
-					
-					buffer += chunk;
-					const lines = buffer.split('\n');
-					
-					// Keep the last incomplete line in buffer
-					buffer = lines.pop() || '';
-					
-					for (const line of lines) {
+				buffer += chunk;
+				const lines = buffer.split('\n');
+				
+				// Keep the last incomplete line in buffer
+				buffer = lines.pop() || '';
+				
+				for (const line of lines) {
+					try {
 						const processedLine = this._transformStreamLine(line);
 						if (processedLine !== null) {
 							transformedStream.push(processedLine + '\n');
 						}
+					} catch (error) {
+						// If transformation fails for a line, pass it through unchanged
+						this._logService.warn(`[FoundryLocal] Failed to transform line, passing through: ${error}`);
+						transformedStream.push(line + '\n');
 					}
-				} catch (error) {
-					this._logService.error(`[FoundryLocal] Error processing chunk ${chunkCount}: ${error}`);
-					transformedStream.destroy(error);
 				}
 			});
 
 			originalBody.on('end', () => {
-				try {
-					this._logService.info(`[FoundryLocal] Stream ended after ${chunkCount} chunks`);
-					// Process any remaining buffer
-					if (buffer.trim()) {
+				// Process any remaining buffer
+				if (buffer.trim()) {
+					try {
 						const processedLine = this._transformStreamLine(buffer);
 						if (processedLine !== null) {
 							transformedStream.push(processedLine + '\n');
 						}
+					} catch (error) {
+						this._logService.warn(`[FoundryLocal] Failed to transform final line, passing through: ${error}`);
+						transformedStream.push(buffer + '\n');
 					}
-					transformedStream.push(null); // Signal end of stream
-				} catch (error) {
-					this._logService.error(`[FoundryLocal] Error ending stream: ${error}`);
-					transformedStream.destroy(error);
 				}
+				transformedStream.push(null); // Signal end of stream
+				this._logService.info('[FoundryLocal] Stream transformation completed');
 			});
 
 			originalBody.on('error', (error) => {
-				this._logService.error(`[FoundryLocal] Stream error: ${error}`);
+				this._logService.error(`[FoundryLocal] Original stream error: ${error}`);
 				transformedStream.destroy(error);
 			});
 
 			// Create a new response with the transformed stream
-			const transformedResponse = {
+			return {
 				...response,
 				body: () => Promise.resolve(transformedStream),
 				ok: response.ok,
@@ -217,8 +202,6 @@ export class FoundryLocalEndpoint extends OpenAIEndpoint {
 				headers: response.headers
 			} as Response;
 
-			this._logService.info('[FoundryLocal] Stream transformation setup complete');
-			return transformedResponse;
 		} catch (error) {
 			this._logService.error(`[FoundryLocal] Failed to setup stream transformation: ${error}`);
 			// Return original response if transformation fails
@@ -246,30 +229,23 @@ export class FoundryLocalEndpoint extends OpenAIEndpoint {
 
 		try {
 			const data = JSON.parse(jsonPart);
-			let transformedChoices = false;
 			
 			// Transform choices array if it exists
 			if (data.choices && Array.isArray(data.choices)) {
-				data.choices = data.choices.map((choice: any, index: number) => {
+				data.choices = data.choices.map((choice: any) => {
 					if (choice.message && choice.delta) {
 						// Remove the duplicate message field, keep only delta
 						const { message, ...choiceWithoutMessage } = choice;
-						this._logService.trace(`[FoundryLocal] Removed duplicate message field from choice ${index}`);
-						transformedChoices = true;
 						return choiceWithoutMessage;
 					}
 					return choice;
 				});
 			}
 
-			if (transformedChoices) {
-				this._logService.trace(`[FoundryLocal] Transformed streaming chunk with ${data.choices.length} choices`);
-			}
-
 			return `data: ${JSON.stringify(data)}`;
 		} catch (error) {
-			this._logService.warn(`[FoundryLocal] Failed to parse streaming chunk: ${error}, line: ${trimmedLine.substring(0, 200)}`);
 			// Return original line if parsing fails to avoid breaking the stream
+			this._logService.debug(`[FoundryLocal] Failed to parse streaming chunk, passing through: ${error}`);
 			return trimmedLine;
 		}
 	}

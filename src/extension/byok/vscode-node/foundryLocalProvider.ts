@@ -276,14 +276,25 @@ export class FoundryLocalLMProvider extends BaseOpenAICompatibleLMProvider {
 		progress: Progress<ChatResponseFragment2>, 
 		token: CancellationToken
 	): Promise<any> {
-		const modelInfo: IChatModelInformation = await this.getModelInfo(model.id, this._localApiKey || '');
-		const foundryLocalEndpoint = this._localInstantiationService.createInstance(
-			FoundryLocalEndpoint, 
-			modelInfo, 
-			this._localApiKey || '', 
-			`${this._localBaseUrl}/chat/completions`
-		);
-		return this._localLmWrapper.provideLanguageModelResponse(foundryLocalEndpoint, messages, options, options.extensionId, progress, token);
+		this._logService.info(`[FoundryLocal] Starting chat response for model: ${model.id}`);
+		
+		try {
+			const modelInfo: IChatModelInformation = await this.getModelInfo(model.id, this._localApiKey || '');
+			this._logService.info(`[FoundryLocal] Got model info for: ${model.id}`);
+			
+			const foundryLocalEndpoint = this._localInstantiationService.createInstance(
+				FoundryLocalEndpoint, 
+				modelInfo, 
+				this._localApiKey || '', 
+				`${this._localBaseUrl}/chat/completions`
+			);
+			this._logService.info(`[FoundryLocal] Created custom endpoint with URL: ${this._localBaseUrl}/chat/completions`);
+			
+			return this._localLmWrapper.provideLanguageModelResponse(foundryLocalEndpoint, messages, options, options.extensionId, progress, token);
+		} catch (error) {
+			this._logService.error(`[FoundryLocal] Error in provideLanguageModelChatResponse: ${error}`);
+			throw error;
+		}
 	}
 
 	/**
@@ -294,13 +305,22 @@ export class FoundryLocalLMProvider extends BaseOpenAICompatibleLMProvider {
 		text: string | LanguageModelChatMessage | LanguageModelChatMessage2, 
 		token: CancellationToken
 	): Promise<number> {
-		const modelInfo: IChatModelInformation = await this.getModelInfo(model.id, this._localApiKey || '');
-		const foundryLocalEndpoint = this._localInstantiationService.createInstance(
-			FoundryLocalEndpoint, 
-			modelInfo, 
-			this._localApiKey || '', 
-			`${this._localBaseUrl}/chat/completions`
-		);
-		return this._localLmWrapper.provideTokenCount(foundryLocalEndpoint, text);
+		this._logService.info(`[FoundryLocal] Starting token count for model: ${model.id}`);
+		
+		try {
+			const modelInfo: IChatModelInformation = await this.getModelInfo(model.id, this._localApiKey || '');
+			const foundryLocalEndpoint = this._localInstantiationService.createInstance(
+				FoundryLocalEndpoint, 
+				modelInfo, 
+				this._localApiKey || '', 
+				`${this._localBaseUrl}/chat/completions`
+			);
+			this._logService.info(`[FoundryLocal] Created endpoint for token counting`);
+			
+			return this._localLmWrapper.provideTokenCount(foundryLocalEndpoint, text);
+		} catch (error) {
+			this._logService.error(`[FoundryLocal] Error in provideTokenCount: ${error}`);
+			throw error;
+		}
 	}
 }

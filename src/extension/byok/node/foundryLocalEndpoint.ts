@@ -76,19 +76,37 @@ export class FoundryLocalEndpoint extends OpenAIEndpoint {
 		// Only apply transformation for Foundry Local endpoints
 		if (this._isFoundryLocalEndpoint()) {
 			this._logService.info('[FoundryLocal] Applying streaming format transformation');
-			const transformedResponse = await this._transformFoundryLocalStream(response);
-			return super.processResponseFromChatEndpoint(
-				telemetryService,
-				logService,
-				transformedResponse,
-				expectedNumChoices,
-				finishCallback,
-				telemetryData,
-				cancellationToken
-			);
+			try {
+				const transformedResponse = await this._transformFoundryLocalStream(response);
+				this._logService.info('[FoundryLocal] Successfully transformed stream, calling super method');
+				
+				return super.processResponseFromChatEndpoint(
+					telemetryService,
+					logService,
+					transformedResponse,
+					expectedNumChoices,
+					finishCallback,
+					telemetryData,
+					cancellationToken
+				);
+			} catch (error) {
+				this._logService.error(`[FoundryLocal] Stream transformation failed: ${error}`);
+				// Fall back to original response if transformation fails
+				this._logService.warn('[FoundryLocal] Falling back to original response processing');
+				return super.processResponseFromChatEndpoint(
+					telemetryService,
+					logService,
+					response,
+					expectedNumChoices,
+					finishCallback,
+					telemetryData,
+					cancellationToken
+				);
+			}
 		}
 
 		// For non-Foundry Local endpoints, use standard processing
+		this._logService.info('[FoundryLocal] Not a Foundry Local endpoint, using standard processing');
 		return super.processResponseFromChatEndpoint(
 			telemetryService,
 			logService,
@@ -104,8 +122,16 @@ export class FoundryLocalEndpoint extends OpenAIEndpoint {
 	 * Check if this endpoint is a Foundry Local endpoint
 	 */
 	private _isFoundryLocalEndpoint(): boolean {
-		const url = this.urlOrRequestMetadata as string;
-		return url.includes('localhost:5273') || url.includes('foundry');
+		try {
+			const url = this.urlOrRequestMetadata as string;
+			this._logService.info(`[FoundryLocal] Checking URL for Foundry Local: ${url}`);
+			const isFoundryLocal = url && (url.includes('localhost:5273') || url.includes('foundry'));
+			this._logService.info(`[FoundryLocal] Is Foundry Local endpoint: ${isFoundryLocal}`);
+			return isFoundryLocal;
+		} catch (error) {
+			this._logService.warn(`[FoundryLocal] Error checking URL: ${error}`);
+			return false;
+		}
 	}
 
 	/**
@@ -113,61 +139,85 @@ export class FoundryLocalEndpoint extends OpenAIEndpoint {
 	 * Removes the duplicate 'message' field while keeping 'delta' field.
 	 */
 	private async _transformFoundryLocalStream(response: Response): Promise<Response> {
-		const originalBody = await response.body() as NodeJS.ReadableStream;
-		const { Readable } = await import('stream');
+		this._logService.info('[FoundryLocal] Starting stream transformation');
 		
-		// Create a transform stream to fix the format
-		const transformedStream = new Readable({
-			read() {
-				// No-op, we'll push data as it comes
-			}
-		});
-
-		let buffer = '';
-		originalBody.setEncoding('utf8');
-		
-		originalBody.on('data', (chunk: string) => {
-			buffer += chunk;
-			const lines = buffer.split('\n');
+		try {
+			const originalBody = await response.body() as NodeJS.ReadableStream;
+			const { Readable } = await import('stream');
 			
-			// Keep the last incomplete line in buffer
-			buffer = lines.pop() || '';
+			// Create a transform stream to fix the format
+			const transformedStream = new Readable({
+				read() {
+					// No-op, we'll push data as it comes
+				}
+			});
+
+			let buffer = '';
+			let chunkCount = 0;
+			originalBody.setEncoding('utf8');
 			
-			for (const line of lines) {
-				const processedLine = this._transformStreamLine(line);
-				if (processedLine !== null) {
-					transformedStream.push(processedLine + '\n');
+			originalBody.on('data', (chunk: string) => {
+				try {
+					chunkCount++;
+					this._logService.trace(`[FoundryLocal] Processing chunk ${chunkCount}: ${chunk.substring(0, 100)}...`);
+					
+					buffer += chunk;
+					const lines = buffer.split('\n');
+					
+					// Keep the last incomplete line in buffer
+					buffer = lines.pop() || '';
+					
+					for (const line of lines) {
+						const processedLine = this._transformStreamLine(line);
+						if (processedLine !== null) {
+							transformedStream.push(processedLine + '\n');
+						}
+					}
+				} catch (error) {
+					this._logService.error(`[FoundryLocal] Error processing chunk ${chunkCount}: ${error}`);
+					transformedStream.destroy(error);
 				}
-			}
-		});
+			});
 
-		originalBody.on('end', () => {
-			// Process any remaining buffer
-			if (buffer.trim()) {
-				const processedLine = this._transformStreamLine(buffer);
-				if (processedLine !== null) {
-					transformedStream.push(processedLine + '\n');
+			originalBody.on('end', () => {
+				try {
+					this._logService.info(`[FoundryLocal] Stream ended after ${chunkCount} chunks`);
+					// Process any remaining buffer
+					if (buffer.trim()) {
+						const processedLine = this._transformStreamLine(buffer);
+						if (processedLine !== null) {
+							transformedStream.push(processedLine + '\n');
+						}
+					}
+					transformedStream.push(null); // Signal end of stream
+				} catch (error) {
+					this._logService.error(`[FoundryLocal] Error ending stream: ${error}`);
+					transformedStream.destroy(error);
 				}
-			}
-			transformedStream.push(null); // Signal end of stream
-		});
+			});
 
-		originalBody.on('error', (error) => {
-			this._logService.error(`[FoundryLocal] Stream error: ${error}`);
-			transformedStream.destroy(error);
-		});
+			originalBody.on('error', (error) => {
+				this._logService.error(`[FoundryLocal] Stream error: ${error}`);
+				transformedStream.destroy(error);
+			});
 
-		// Create a new response with the transformed stream
-		const transformedResponse = {
-			...response,
-			body: () => Promise.resolve(transformedStream),
-			ok: response.ok,
-			status: response.status,
-			statusText: response.statusText,
-			headers: response.headers
-		} as Response;
+			// Create a new response with the transformed stream
+			const transformedResponse = {
+				...response,
+				body: () => Promise.resolve(transformedStream),
+				ok: response.ok,
+				status: response.status,
+				statusText: response.statusText,
+				headers: response.headers
+			} as Response;
 
-		return transformedResponse;
+			this._logService.info('[FoundryLocal] Stream transformation setup complete');
+			return transformedResponse;
+		} catch (error) {
+			this._logService.error(`[FoundryLocal] Failed to setup stream transformation: ${error}`);
+			// Return original response if transformation fails
+			return response;
+		}
 	}
 
 	/**
@@ -190,24 +240,30 @@ export class FoundryLocalEndpoint extends OpenAIEndpoint {
 
 		try {
 			const data = JSON.parse(jsonPart);
+			let transformedChoices = false;
 			
 			// Transform choices array if it exists
 			if (data.choices && Array.isArray(data.choices)) {
-				data.choices = data.choices.map((choice: any) => {
+				data.choices = data.choices.map((choice: any, index: number) => {
 					if (choice.message && choice.delta) {
 						// Remove the duplicate message field, keep only delta
 						const { message, ...choiceWithoutMessage } = choice;
-						this._logService.trace(`[FoundryLocal] Removed duplicate message field from choice`);
+						this._logService.trace(`[FoundryLocal] Removed duplicate message field from choice ${index}`);
+						transformedChoices = true;
 						return choiceWithoutMessage;
 					}
 					return choice;
 				});
 			}
 
+			if (transformedChoices) {
+				this._logService.trace(`[FoundryLocal] Transformed streaming chunk with ${data.choices.length} choices`);
+			}
+
 			return `data: ${JSON.stringify(data)}`;
 		} catch (error) {
-			this._logService.warn(`[FoundryLocal] Failed to parse streaming chunk: ${error}`);
-			// Return original line if parsing fails
+			this._logService.warn(`[FoundryLocal] Failed to parse streaming chunk: ${error}, line: ${trimmedLine.substring(0, 200)}`);
+			// Return original line if parsing fails to avoid breaking the stream
 			return trimmedLine;
 		}
 	}

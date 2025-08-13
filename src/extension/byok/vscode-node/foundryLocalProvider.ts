@@ -26,10 +26,10 @@ export class FoundryLocalLMProvider extends BaseOpenAICompatibleLMProvider {
 	private _modelCache = new Map<string, IChatModelInformation>();
 	private _foundryManager: FoundryLocalManager;
 	private _initialized = false;
-	private _apiKey: string | undefined;
-	private _baseUrl: string;
-	private _lmWrapper: CopilotLanguageModelWrapper;
-	private _instantiationService: IInstantiationService;
+	private _localApiKey: string | undefined;
+	private _localBaseUrl: string;
+	private _localLmWrapper: CopilotLanguageModelWrapper;
+	private _localInstantiationService: IInstantiationService;
 
 	constructor(
 		foundryServiceUrl: string | undefined,
@@ -52,10 +52,10 @@ export class FoundryLocalLMProvider extends BaseOpenAICompatibleLMProvider {
 		);
 
 		// Store instance variables to avoid accessing private base class members
-		this._apiKey = undefined;
-		this._baseUrl = `${serviceUrl}/v1`;
-		this._instantiationService = _instantiationService;
-		this._lmWrapper = _instantiationService.createInstance(CopilotLanguageModelWrapper);
+		this._localApiKey = undefined;
+		this._localBaseUrl = `${serviceUrl}/v1`;
+		this._localInstantiationService = _instantiationService;
+		this._localLmWrapper = _instantiationService.createInstance(CopilotLanguageModelWrapper);
 
 		// Initialize Foundry manager - will be properly initialized on first use
 		this._foundryManager = new FoundryLocalManager();
@@ -269,9 +269,6 @@ export class FoundryLocalLMProvider extends BaseOpenAICompatibleLMProvider {
 		}
 	}
 
-	/**
-	 * Override to use custom FoundryLocalEndpoint that handles streaming format transformation
-	 */
 	override async provideLanguageModelChatResponse(
 		model: LanguageModelChatInformation, 
 		messages: Array<LanguageModelChatMessage | LanguageModelChatMessage2>, 
@@ -279,14 +276,14 @@ export class FoundryLocalLMProvider extends BaseOpenAICompatibleLMProvider {
 		progress: Progress<ChatResponseFragment2>, 
 		token: CancellationToken
 	): Promise<any> {
-		const modelInfo: IChatModelInformation = await this.getModelInfo(model.id, this._apiKey || '');
-		const foundryLocalEndpoint = this._instantiationService.createInstance(
+		const modelInfo: IChatModelInformation = await this.getModelInfo(model.id, this._localApiKey || '');
+		const foundryLocalEndpoint = this._localInstantiationService.createInstance(
 			FoundryLocalEndpoint, 
 			modelInfo, 
-			this._apiKey || '', 
-			`${this._baseUrl}/chat/completions`
+			this._localApiKey || '', 
+			`${this._localBaseUrl}/chat/completions`
 		);
-		return this._lmWrapper.provideLanguageModelResponse(foundryLocalEndpoint, messages, options, options.extensionId, progress, token);
+		return this._localLmWrapper.provideLanguageModelResponse(foundryLocalEndpoint, messages, options, options.extensionId, progress, token);
 	}
 
 	/**
@@ -297,13 +294,13 @@ export class FoundryLocalLMProvider extends BaseOpenAICompatibleLMProvider {
 		text: string | LanguageModelChatMessage | LanguageModelChatMessage2, 
 		token: CancellationToken
 	): Promise<number> {
-		const modelInfo: IChatModelInformation = await this.getModelInfo(model.id, this._apiKey || '');
-		const foundryLocalEndpoint = this._instantiationService.createInstance(
+		const modelInfo: IChatModelInformation = await this.getModelInfo(model.id, this._localApiKey || '');
+		const foundryLocalEndpoint = this._localInstantiationService.createInstance(
 			FoundryLocalEndpoint, 
 			modelInfo, 
-			this._apiKey || '', 
-			`${this._baseUrl}/chat/completions`
+			this._localApiKey || '', 
+			`${this._localBaseUrl}/chat/completions`
 		);
-		return this._lmWrapper.provideTokenCount(foundryLocalEndpoint, text);
+		return this._localLmWrapper.provideTokenCount(foundryLocalEndpoint, text);
 	}
 }

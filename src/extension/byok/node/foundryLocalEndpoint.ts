@@ -59,6 +59,12 @@ export class FoundryLocalEndpoint extends OpenAIEndpoint {
 			instantiationService,
 			thinkingDataService
 		);
+		
+		this._logService.info(`[FoundryLocal] Created FoundryLocalEndpoint with URL: ${_modelUrl}`);
+		this._logService.info(`[FoundryLocal] Model info: ${JSON.stringify({
+			name: _modelInfo.name,
+			capabilities: _modelInfo.capabilities ? Object.keys(_modelInfo.capabilities) : 'none'
+		})}`);
 	}
 
 	/**

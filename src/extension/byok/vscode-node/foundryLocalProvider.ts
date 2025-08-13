@@ -8,6 +8,7 @@ import { IChatModelInformation } from '../../../platform/endpoint/common/endpoin
 import { ILogService } from '../../../platform/log/common/logService';
 import { IFetcherService } from '../../../platform/networking/common/fetcherService';
 import { IInstantiationService } from '../../../util/vs/platform/instantiation/common/instantiation';
+import { CopilotLanguageModelWrapper } from '../../conversation/vscode-node/languageModelAccess';
 import { BYOKAuthType, BYOKKnownModels, BYOKModelCapabilities } from '../common/byokProvider';
 import { BaseOpenAICompatibleLMProvider } from './baseOpenAICompatibleProvider';
 import { IBYOKStorageService } from './byokStorageService';
@@ -25,6 +26,10 @@ export class FoundryLocalLMProvider extends BaseOpenAICompatibleLMProvider {
 	private _modelCache = new Map<string, IChatModelInformation>();
 	private _foundryManager: FoundryLocalManager;
 	private _initialized = false;
+	private _apiKey: string | undefined;
+	private _baseUrl: string;
+	private _lmWrapper: CopilotLanguageModelWrapper;
+	private _instantiationService: IInstantiationService;
 
 	constructor(
 		foundryServiceUrl: string | undefined,
@@ -45,6 +50,12 @@ export class FoundryLocalLMProvider extends BaseOpenAICompatibleLMProvider {
 			_logService,
 			_instantiationService
 		);
+
+		// Store instance variables to avoid accessing private base class members
+		this._apiKey = undefined;
+		this._baseUrl = `${serviceUrl}/v1`;
+		this._instantiationService = _instantiationService;
+		this._lmWrapper = _instantiationService.createInstance(CopilotLanguageModelWrapper);
 
 		// Initialize Foundry manager - will be properly initialized on first use
 		this._foundryManager = new FoundryLocalManager();
@@ -72,26 +83,6 @@ export class FoundryLocalLMProvider extends BaseOpenAICompatibleLMProvider {
 				'Failed to initialize Foundry Local service. ' +
 				'Please ensure Foundry Local is installed and running. ' +
 				'You can start it with "foundry local start".'
-			);
-		}
-	}
-
-	/**
-	 * Check if Foundry Local service is healthy and accessible
-	 */
-	private async _checkServiceHealth(): Promise<void> {
-		await this._ensureInitialized();
-		
-		try {
-			const models = await this._foundryManager.listCatalogModels();
-			if (!models || models.length === 0) {
-				throw new Error('No models available in catalog');
-			}
-		} catch (error) {
-			this._logService.error(`Foundry Local service health check failed: ${error}`);
-			throw new Error(
-				'Foundry Local service is not accessible. ' +
-				'Please ensure it is running ("foundry local start") and models are available.'
 			);
 		}
 	}
@@ -288,11 +279,11 @@ export class FoundryLocalLMProvider extends BaseOpenAICompatibleLMProvider {
 		progress: Progress<ChatResponseFragment2>, 
 		token: CancellationToken
 	): Promise<any> {
-		const modelInfo: IChatModelInformation = await this.getModelInfo(model.id, this._apiKey);
+		const modelInfo: IChatModelInformation = await this.getModelInfo(model.id, this._apiKey || '');
 		const foundryLocalEndpoint = this._instantiationService.createInstance(
 			FoundryLocalEndpoint, 
 			modelInfo, 
-			this._apiKey ?? '', 
+			this._apiKey || '', 
 			`${this._baseUrl}/chat/completions`
 		);
 		return this._lmWrapper.provideLanguageModelResponse(foundryLocalEndpoint, messages, options, options.extensionId, progress, token);
@@ -306,11 +297,11 @@ export class FoundryLocalLMProvider extends BaseOpenAICompatibleLMProvider {
 		text: string | LanguageModelChatMessage | LanguageModelChatMessage2, 
 		token: CancellationToken
 	): Promise<number> {
-		const modelInfo: IChatModelInformation = await this.getModelInfo(model.id, this._apiKey);
+		const modelInfo: IChatModelInformation = await this.getModelInfo(model.id, this._apiKey || '');
 		const foundryLocalEndpoint = this._instantiationService.createInstance(
 			FoundryLocalEndpoint, 
 			modelInfo, 
-			this._apiKey ?? '', 
+			this._apiKey || '', 
 			`${this._baseUrl}/chat/completions`
 		);
 		return this._lmWrapper.provideTokenCount(foundryLocalEndpoint, text);

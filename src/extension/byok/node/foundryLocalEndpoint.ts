@@ -64,7 +64,7 @@ export class FoundryLocalEndpoint extends OpenAIEndpoint {
 	/**
 	 * Override the response processor to transform Foundry Local's dual delta+message format
 	 */
-	public async processResponseFromChatEndpoint(
+	public override async processResponseFromChatEndpoint(
 		telemetryService: ITelemetryService,
 		logService: ILogService,
 		response: Response,

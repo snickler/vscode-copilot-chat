@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { CancellationToken, ChatResponseFragment2, LanguageModelChatInformation, LanguageModelChatMessage, LanguageModelChatMessage2, LanguageModelChatRequestHandleOptions, Progress } from 'vscode';
 import { IChatModelInformation } from '../../../platform/endpoint/common/endpointProvider';
 import { ILogService } from '../../../platform/log/common/logService';
 import { IFetcherService } from '../../../platform/networking/common/fetcherService';
@@ -10,6 +11,7 @@ import { IInstantiationService } from '../../../util/vs/platform/instantiation/c
 import { BYOKAuthType, BYOKKnownModels, BYOKModelCapabilities } from '../common/byokProvider';
 import { BaseOpenAICompatibleLMProvider } from './baseOpenAICompatibleProvider';
 import { IBYOKStorageService } from './byokStorageService';
+import { FoundryLocalEndpoint } from '../node/foundryLocalEndpoint';
 
 // Foundry Local SDK
 import { FoundryLocalManager, FoundryModelInfo } from 'foundry-local-sdk';
@@ -274,5 +276,43 @@ export class FoundryLocalLMProvider extends BaseOpenAICompatibleLMProvider {
 				'Please ensure Foundry Local is properly installed and configured.'
 			);
 		}
+	}
+
+	/**
+	 * Override to use custom FoundryLocalEndpoint that handles streaming format transformation
+	 */
+	override async provideLanguageModelChatResponse(
+		model: LanguageModelChatInformation, 
+		messages: Array<LanguageModelChatMessage | LanguageModelChatMessage2>, 
+		options: LanguageModelChatRequestHandleOptions, 
+		progress: Progress<ChatResponseFragment2>, 
+		token: CancellationToken
+	): Promise<any> {
+		const modelInfo: IChatModelInformation = await this.getModelInfo(model.id, this._apiKey);
+		const foundryLocalEndpoint = this._instantiationService.createInstance(
+			FoundryLocalEndpoint, 
+			modelInfo, 
+			this._apiKey ?? '', 
+			`${this._baseUrl}/chat/completions`
+		);
+		return this._lmWrapper.provideLanguageModelResponse(foundryLocalEndpoint, messages, options, options.extensionId, progress, token);
+	}
+
+	/**
+	 * Override to use custom FoundryLocalEndpoint for token counting
+	 */
+	override async provideTokenCount(
+		model: LanguageModelChatInformation, 
+		text: string | LanguageModelChatMessage | LanguageModelChatMessage2, 
+		token: CancellationToken
+	): Promise<number> {
+		const modelInfo: IChatModelInformation = await this.getModelInfo(model.id, this._apiKey);
+		const foundryLocalEndpoint = this._instantiationService.createInstance(
+			FoundryLocalEndpoint, 
+			modelInfo, 
+			this._apiKey ?? '', 
+			`${this._baseUrl}/chat/completions`
+		);
+		return this._lmWrapper.provideTokenCount(foundryLocalEndpoint, text);
 	}
 }

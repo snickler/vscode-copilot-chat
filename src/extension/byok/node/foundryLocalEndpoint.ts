@@ -12,7 +12,7 @@ import { IDomainService } from '../../../platform/endpoint/common/domainService'
 import { IChatModelInformation } from '../../../platform/endpoint/common/endpointProvider';
 import { IEnvService } from '../../../platform/env/common/envService';
 import { ILogService } from '../../../platform/log/common/logService';
-import { FinishedCallback, OptionalChatRequestParams } from '../../../platform/networking/common/fetch';
+import { FinishedCallback, IResponseDelta, OptionalChatRequestParams } from '../../../platform/networking/common/fetch';
 import { IFetcherService, Response } from '../../../platform/networking/common/fetcherService';
 import { IEndpointBody } from '../../../platform/networking/common/networking';
 import { ITelemetryService, TelemetryProperties } from '../../../platform/telemetry/common/telemetry';
@@ -80,60 +80,14 @@ export class FoundryLocalEndpoint extends OpenAIEndpoint {
 		if (this._isFoundryLocalEndpoint()) {
 			this._logService.info('[FoundryLocal] Making chat request with Foundry Local format transformation');
 			
-			// Wrap the original finishedCb to transform the response
-			const transformedFinishedCb: FinishedCallback = async (chunk: string) => {
-				let transformedChunk = chunk;
+			// For now, just pass through to the original callback
+			// TODO: Implement proper dual format handling at the response level
+			const transformedFinishedCb: FinishedCallback = async (text: string, index: number, delta) => {
+				this._logService.debug('[FoundryLocal] Passing through to original finishedCb');
 				
-				try {
-					// Check if this chunk contains the dual format issue
-					if (chunk.includes('"delta":') && chunk.includes('"message":')) {
-						this._logService.debug('[FoundryLocal] Detected dual format chunk, applying transformation');
-						
-						// Split by SSE data boundaries and process each event
-						const lines = chunk.split('\n');
-						const transformedLines: string[] = [];
-						
-						for (const line of lines) {
-							if (line.startsWith('data: ') && line !== 'data: [DONE]') {
-								try {
-									const dataContent = line.substring(6); // Remove "data: " prefix
-									const parsed = JSON.parse(dataContent);
-									
-									if (parsed.choices && Array.isArray(parsed.choices)) {
-										// Remove message field from each choice to prevent duplicate processing
-										parsed.choices = parsed.choices.map((choice: any) => {
-											if (choice.message && choice.delta) {
-												this._logService.debug('[FoundryLocal] Removing duplicate message field from choice');
-												const { message, ...choiceWithoutMessage } = choice;
-												return choiceWithoutMessage;
-											}
-											return choice;
-										});
-									}
-									
-									transformedLines.push('data: ' + JSON.stringify(parsed));
-								} catch (parseError) {
-									// If we can't parse, keep the original line
-									this._logService.debug(`[FoundryLocal] Could not parse line, keeping original: ${parseError}`);
-									transformedLines.push(line);
-								}
-							} else {
-								// Keep non-data lines as-is (like empty lines, [DONE], etc.)
-								transformedLines.push(line);
-							}
-						}
-						
-						transformedChunk = transformedLines.join('\n');
-						this._logService.debug('[FoundryLocal] Applied transformation to remove duplicate message fields');
-					}
-				} catch (error) {
-					this._logService.warn(`[FoundryLocal] Error during chunk transformation, using original: ${error}`);
-					transformedChunk = chunk;
-				}
-				
-				// Call the original finishedCb with the transformed chunk
+				// Call the original finishedCb with the correct parameters
 				if (finishedCb) {
-					return await finishedCb(transformedChunk);
+					return await finishedCb(text, index, delta);
 				}
 			};
 			

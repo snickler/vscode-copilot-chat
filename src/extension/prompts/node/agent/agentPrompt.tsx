@@ -191,14 +191,14 @@ interface GlobalAgentContextProps extends BasePromptElementProps {
 class GlobalAgentContext extends PromptElement<GlobalAgentContextProps> {
 	render() {
 		return <UserMessage>
-			<Tag name='environment_info'>
+			<Tag name='environment_info' priority={850}>
 				<UserOSPrompt />
 				<UserShellPrompt />
 			</Tag>
-			<Tag name='workspace_info'>
+			<Tag name='workspace_info' priority={840}>
 				<AgentTasksInstructions />
 				<WorkspaceFoldersHint />
-				<MultirootWorkspaceStructure maxSize={2000} excludeDotFiles={true} /><br />
+				<MultirootWorkspaceStructure maxSize={2000} excludeDotFiles={true} priority={830} /><br />
 				This is the state of the context at this point in the conversation. The view of the workspace structure may be truncated. You can use tools to collect more context if needed.
 			</Tag>
 			<UserPreferences flexGrow={7} priority={800} />

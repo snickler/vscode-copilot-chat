@@ -79,7 +79,7 @@ export class FoundryLocalEndpoint extends OpenAIEndpoint {
 			this._logService.info('[FoundryLocal] Processing response with Foundry Local format transformation');
 
 			// Transform the response to remove duplicate message fields
-			const transformedResponse = await this._transformFoundryLocalResponse(response);
+			const transformedResponse = await this._createTransformedResponse(response);
 
 			// Use the default processor with the transformed response
 			return defaultChatResponseProcessor(
@@ -106,75 +106,163 @@ export class FoundryLocalEndpoint extends OpenAIEndpoint {
 	}
 
 	/**
-	 * Transform Foundry Local response to remove duplicate message fields
+	 * Create a transformed response by reading the stream and transforming it
 	 */
-	private async _transformFoundryLocalResponse(response: Response): Promise<Response> {
+	private async _createTransformedResponse(response: Response): Promise<Response> {
 		try {
-			this._logService.info('[FoundryLocal] Starting stream transformation');
+			this._logService.info('[FoundryLocal] Creating transformed response');
 
-			// Get the response body text
-			const originalText = await response.text();
-
-			this._logService.info(`[FoundryLocal] Original response length: ${originalText.length}`);
-
-			// Transform the SSE stream
-			const transformedText = this._transformSSEStream(originalText);
+			// Get the original body stream and read it completely
+			const originalBody = await response.body() as any; // Use any to avoid NodeJS type issues
+			const transformedText = await this._readAndTransformStream(originalBody);
 
 			this._logService.info(`[FoundryLocal] Transformed response length: ${transformedText.length}`);
 
-			// Create new response with transformed text
+			// Create a simple readable stream from the transformed text
+			const transformedStream = this._createReadableStreamFromText(transformedText);
+
+			// Create a new Response with the transformed stream
 			return new Response(
 				response.status,
 				response.statusText,
 				response.headers,
-				() => Promise.resolve(transformedText),
-				() => Promise.resolve(JSON.parse(transformedText)),
-				() => Promise.resolve(transformedText)
+				// text() method
+				async () => transformedText,
+				// json() method - for SSE, this usually isn't used but we'll provide it
+				async () => {
+					throw new Error('JSON parsing not supported for SSE streams');
+				},
+				// body() method - return the stream for SSE processing
+				async () => transformedStream
 			);
 		} catch (error) {
-			this._logService.error(`[FoundryLocal] Error transforming response: ${error}`);
-			// Return original response if transformation fails
+			this._logService.error(`[FoundryLocal] Error creating transformed response: ${error}`);
+			// Return original response on error
 			return response;
 		}
 	}
 
 	/**
-	 * Transform SSE stream to remove duplicate message fields
+	 * Read the original stream and transform it
 	 */
-	private _transformSSEStream(text: string): string {
-		const lines = text.split('\n');
-		const transformedLines: string[] = [];
+	private async _readAndTransformStream(stream: any): Promise<string> {
+		return new Promise((resolve, reject) => {
+			let data = '';
+			
+			stream.on('data', (chunk: string) => {
+				data += chunk;
+			});
 
-		for (const line of lines) {
-			if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+			stream.on('end', () => {
 				try {
-					const dataContent = line.substring(6); // Remove 'data: '
-					const data = JSON.parse(dataContent);
-
-					if (data.choices && Array.isArray(data.choices)) {
-						// Transform each choice to remove duplicate message fields
-						data.choices = data.choices.map((choice: any) => {
-							if (choice.delta && choice.message) {
-								this._logService.info(`[FoundryLocal] Removing duplicate message field from choice ${choice.index}`);
-								// Keep delta, remove message
-								const { message, ...choiceWithoutMessage } = choice;
-								return choiceWithoutMessage;
-							}
-							return choice;
-						});
-					}
-
-					transformedLines.push(`data: ${JSON.stringify(data)}`);
+					const transformedData = this._transformSSEData(data);
+					resolve(transformedData);
 				} catch (error) {
-					this._logService.info(`[FoundryLocal] Could not parse line as JSON, passing through: ${line}`);
+					this._logService.error(`[FoundryLocal] Error transforming stream data: ${error}`);
+					// On transformation error, return original data
+					resolve(data);
+				}
+			});
+
+			stream.on('error', (error: Error) => {
+				this._logService.error(`[FoundryLocal] Error reading stream: ${error}`);
+				reject(error);
+			});
+		});
+	}
+
+	/**
+	 * Create a readable stream from text that mimics the original stream interface
+	 */
+	private _createReadableStreamFromText(text: string): any {
+		const chunks = text.split('\n').map(line => line + '\n');
+		let index = 0;
+		let dataCallback: Function | undefined;
+		let endCallbacks: Function[] = [];
+		let errorCallback: Function | undefined;
+
+		// Start emitting chunks immediately
+		Promise.resolve().then(async () => {
+			try {
+				for (const chunk of chunks) {
+					if (dataCallback) {
+						dataCallback(chunk);
+					}
+					// Add a small delay to simulate async streaming
+					await new Promise(resolve => setTimeout(resolve, 0));
+				}
+				// Emit end event after all chunks
+				endCallbacks.forEach(cb => cb());
+			} catch (error) {
+				if (errorCallback) {
+					errorCallback(error);
+				}
+			}
+		});
+
+		const stream = {
+			on: (event: string, callback: (...args: any[]) => void) => {
+				if (event === 'data') {
+					dataCallback = callback;
+				} else if (event === 'end') {
+					endCallbacks.push(callback);
+				} else if (event === 'error') {
+					errorCallback = callback;
+				}
+			},
+			setEncoding: (encoding: string) => {
+				// No-op for our implementation
+			}
+		};
+
+		return stream;
+	}
+
+	/**
+	 * Transform SSE data to remove duplicate message fields
+	 */
+	private _transformSSEData(data: string): string {
+		try {
+			const lines = data.split('\n');
+			const transformedLines: string[] = [];
+
+			for (const line of lines) {
+				if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+					try {
+						const dataContent = line.substring(6); // Remove 'data: '
+						const parsed = JSON.parse(dataContent);
+
+						if (parsed.choices && Array.isArray(parsed.choices)) {
+							// Transform each choice to remove duplicate message fields
+							parsed.choices = parsed.choices.map((choice: any) => {
+								if (choice.delta && choice.message) {
+									this._logService.info(`[FoundryLocal] Removing duplicate message field from choice ${choice.index}`);
+									// Keep delta, remove message
+									const { message, ...choiceWithoutMessage } = choice;
+									return choiceWithoutMessage;
+								}
+								return choice;
+							});
+						}
+
+						transformedLines.push(`data: ${JSON.stringify(parsed)}`);
+					} catch (parseError) {
+						// If we can't parse as JSON, pass through unchanged
+						this._logService.warn(`[FoundryLocal] Could not parse line as JSON, passing through: ${line}`);
+						transformedLines.push(line);
+					}
+				} else {
+					// Pass through non-data lines unchanged
 					transformedLines.push(line);
 				}
-			} else {
-				transformedLines.push(line);
 			}
-		}
 
-		return transformedLines.join('\n');
+			return transformedLines.join('\n');
+		} catch (error) {
+			this._logService.error(`[FoundryLocal] Error transforming SSE data: ${error}`);
+			// Return original data on error
+			return data;
+		}
 	}
 
 	/**

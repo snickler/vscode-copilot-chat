@@ -3,13 +3,13 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { CancellationToken, ChatResponseFragment2, LanguageModelChatInformation, LanguageModelChatMessage, LanguageModelChatMessage2, LanguageModelChatRequestHandleOptions, Progress } from 'vscode';
+import { CancellationToken, LanguageModelChatInformation, LanguageModelChatMessage, LanguageModelChatMessage2, LanguageModelChatRequestHandleOptions, Progress } from 'vscode';
 import { IChatModelInformation } from '../../../platform/endpoint/common/endpointProvider';
 import { ILogService } from '../../../platform/log/common/logService';
 import { IFetcherService } from '../../../platform/networking/common/fetcherService';
 import { IInstantiationService } from '../../../util/vs/platform/instantiation/common/instantiation';
 import { CopilotLanguageModelWrapper } from '../../conversation/vscode-node/languageModelAccess';
-import { BYOKAuthType, BYOKKnownModels, BYOKModelCapabilities } from '../common/byokProvider';
+import { BYOKAuthType, BYOKKnownModels, BYOKModelCapabilities, LMResponsePart } from '../common/byokProvider';
 import { BaseOpenAICompatibleLMProvider } from './baseOpenAICompatibleProvider';
 import { IBYOKStorageService } from './byokStorageService';
 import { FoundryLocalEndpoint } from '../node/foundryLocalEndpoint';
@@ -273,7 +273,7 @@ export class FoundryLocalLMProvider extends BaseOpenAICompatibleLMProvider {
 		model: LanguageModelChatInformation, 
 		messages: Array<LanguageModelChatMessage | LanguageModelChatMessage2>, 
 		options: LanguageModelChatRequestHandleOptions, 
-		progress: Progress<ChatResponseFragment2>, 
+		progress: Progress<LMResponsePart>, 
 		token: CancellationToken
 	): Promise<any> {
 		this._logService.info(`[FoundryLocal] Starting chat response for model: ${model.id}`);

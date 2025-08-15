@@ -303,8 +303,19 @@ export class FoundryLocalLMProvider extends BaseOpenAICompatibleLMProvider {
 	}
 
 	/**
-	 * Override to use custom FoundryLocalEndpoint for token counting
+	 * Override to add debug logging for provider registration 
 	 */
+	override async prepareLanguageModelChatInformation(options: { silent: boolean }, token: CancellationToken): Promise<LanguageModelChatInformation[]> {
+		this._logService.info(`[FoundryLocal] prepareLanguageModelChatInformation called with silent=${options.silent}`);
+		try {
+			const result = await super.prepareLanguageModelChatInformation(options, token);
+			this._logService.info(`[FoundryLocal] prepareLanguageModelChatInformation returning ${result.length} models`);
+			return result;
+		} catch (error) {
+			this._logService.error(`[FoundryLocal] prepareLanguageModelChatInformation error: ${error}`);
+			throw error;
+		}
+	}
 	override async provideTokenCount(
 		model: LanguageModelChatInformation, 
 		text: string | LanguageModelChatMessage | LanguageModelChatMessage2, 

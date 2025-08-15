@@ -68,8 +68,10 @@ export class BYOKContrib extends Disposable implements IExtensionContribution {
 			this._providers.set(FoundryLocalLMProvider.providerName.toLowerCase(), instantiationService.createInstance(FoundryLocalLMProvider, this._configurationService.getConfig(ConfigKey.FoundryLocalEndpoint), this._byokStorageService));
 
 			for (const [providerName, provider] of this._providers) {
+				this._logService.info(`[BYOK] Registering language model provider: ${providerName}`);
 				this._store.add(lm.registerLanguageModelChatProvider(providerName, provider));
 			}
+			this._logService.info(`[BYOK] Successfully registered ${this._providers.size} language model providers`);
 		}
 	}
 	private async fetchKnownModelList(fetcherService: IFetcherService): Promise<Record<string, BYOKKnownModels>> {

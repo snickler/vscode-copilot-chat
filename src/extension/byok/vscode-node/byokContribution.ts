@@ -2,7 +2,8 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-import { commands, LanguageModelChatInformation, lm } from 'vscode';
+import { commands, LanguageModelChatInformation } from 'vscode';
+import * as vscode from 'vscode';
 import { IAuthenticationService } from '../../../platform/authentication/common/authentication';
 import { ConfigKey, IConfigurationService } from '../../../platform/configuration/common/configurationService';
 import { ICAPIClientService } from '../../../platform/endpoint/common/capiClient';
@@ -69,7 +70,7 @@ export class BYOKContrib extends Disposable implements IExtensionContribution {
 
 			for (const [providerName, provider] of this._providers) {
 				this._logService.info(`[BYOK] Registering language model provider: ${providerName}`);
-				this._store.add(lm.registerLanguageModelChatProvider(providerName, provider));
+				this._store.add(vscode.lm.registerLanguageModelChatProvider(providerName, provider));
 			}
 			this._logService.info(`[BYOK] Successfully registered ${this._providers.size} language model providers`);
 		}

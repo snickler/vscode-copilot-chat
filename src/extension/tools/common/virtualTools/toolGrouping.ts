@@ -10,6 +10,7 @@ import { ITelemetryService } from '../../../../platform/telemetry/common/telemet
 import { equals as arraysEqual } from '../../../../util/vs/base/common/arrays';
 import { CancellationToken } from '../../../../util/vs/base/common/cancellation';
 import { Iterable } from '../../../../util/vs/base/common/iterator';
+import { IObservable } from '../../../../util/vs/base/common/observableInternal';
 import { IInstantiationService } from '../../../../util/vs/platform/instantiation/common/instantiation';
 import { LanguageModelTextPart, LanguageModelToolResult } from '../../../../vscodeTypes';
 import { VIRTUAL_TOOL_NAME_PREFIX, VirtualTool } from './virtualTool';
@@ -17,17 +18,11 @@ import { VirtualToolGrouper } from './virtualToolGrouper';
 import * as Constant from './virtualToolsConstants';
 import { IToolCategorization, IToolGrouping } from './virtualToolTypes';
 
-export function computeToolGroupingMinThreshold(experimentationService: IExperimentationService, configurationService: IConfigurationService): number {
-	let threshold = HARD_TOOL_LIMIT;
-
-	const override = experimentationService.getTreatmentVariable<number>('vscode', 'copilotchat.virtualToolThreshold');
-	if (override) {
-		threshold = override;
-	} else if (configurationService.getExperimentBasedConfig(ConfigKey.VirtualTools, experimentationService)) {
-		threshold = Constant.START_GROUPING_AFTER_TOOL_COUNT;
-	}
-
-	return threshold;
+export function computeToolGroupingMinThreshold(experimentationService: IExperimentationService, configurationService: IConfigurationService): IObservable<number> {
+	return configurationService.getExperimentBasedConfigObservable(ConfigKey.VirtualToolThreshold, experimentationService).map(configured => {
+		const value = configured ?? HARD_TOOL_LIMIT;
+		return value <= 0 ? Infinity : value;
+	});
 }
 
 export class ToolGrouping implements IToolGrouping {
@@ -37,6 +32,7 @@ export class ToolGrouping implements IToolGrouping {
 	private _didToolsChange = true;
 	private _turnNo = 0;
 	private _trimOnNextCompute = false;
+	private _expandOnNext?: Set<string>;
 
 	public get tools(): readonly LanguageModelToolInformation[] {
 		return this._tools;
@@ -51,7 +47,7 @@ export class ToolGrouping implements IToolGrouping {
 	}
 
 	public get isEnabled() {
-		return this._tools.length >= computeToolGroupingMinThreshold(this._experimentationService, this._configurationService);
+		return this._tools.length >= computeToolGroupingMinThreshold(this._experimentationService, this._configurationService).get();
 	}
 
 	constructor(
@@ -88,7 +84,6 @@ export class ToolGrouping implements IToolGrouping {
 				}
 			*/
 			this._telemetryService.sendMSFTTelemetryEvent('virtualTools.called', {
-				owner: 'connor4312',
 				callName: tool.name,
 			}, {
 				turnNo: localTurnNumber,
@@ -122,6 +117,11 @@ export class ToolGrouping implements IToolGrouping {
 		this._trimOnNextCompute = true;
 	}
 
+	ensureExpanded(toolName: string): void {
+		this._expandOnNext ??= new Set();
+		this._expandOnNext.add(toolName);
+	}
+
 	async compute(token: CancellationToken): Promise<LanguageModelToolInformation[]> {
 		await this._doCompute(token);
 		return [...this._root.tools()];
@@ -136,6 +136,16 @@ export class ToolGrouping implements IToolGrouping {
 		if (this._didToolsChange) {
 			await this._grouper.addGroups(this._root, this._tools.slice(), token);
 			this._didToolsChange = false;
+		}
+
+		if (this._expandOnNext) {
+			for (const toolName of this._expandOnNext) {
+				this._root.find(toolName)?.path.forEach(p => {
+					p.isExpanded = true;
+					p.lastUsedOnTurn = this._turnNo;
+				});
+			}
+			this._expandOnNext = undefined;
 		}
 
 		let trimDownTo = HARD_TOOL_LIMIT;

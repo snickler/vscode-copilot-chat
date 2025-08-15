@@ -26,10 +26,6 @@ export class FoundryLocalLMProvider extends BaseOpenAICompatibleLMProvider {
 	private _modelCache = new Map<string, IChatModelInformation>();
 	private _foundryManager: FoundryLocalManager;
 	private _initialized = false;
-	private _localApiKey: string | undefined;
-	private _localBaseUrl: string;
-	private _localLmWrapper: CopilotLanguageModelWrapper;
-	private _localInstantiationService: IInstantiationService;
 
 	constructor(
 		foundryServiceUrl: string | undefined,
@@ -269,37 +265,21 @@ export class FoundryLocalLMProvider extends BaseOpenAICompatibleLMProvider {
 		}
 	}
 
-	override async provideLanguageModelChatResponse(
-		model: LanguageModelChatInformation, 
-		messages: Array<LanguageModelChatMessage | LanguageModelChatMessage2>, 
-		options: LanguageModelChatRequestHandleOptions, 
-		progress: Progress<LMResponsePart>, 
-		token: CancellationToken
-	): Promise<any> {
-		this._logService.info(`[FoundryLocal] Starting chat response for model: ${model.id}`);
-		this._logService.info(`[FoundryLocal] Using baseUrl: ${this._localBaseUrl}`);
+	/**
+	 * Override to use custom FoundryLocalEndpoint instead of OpenAIEndpoint
+	 */
+	protected override async getEndpointImpl(model: LanguageModelChatInformation): Promise<any> {
+		this._logService.info(`[FoundryLocal] Creating endpoint for model: ${model.id}`);
+		const modelInfo: IChatModelInformation = await this.getModelInfo(model.id, this._localApiKey || '');
+		const endpointUrl = `${this._localBaseUrl}/chat/completions`;
+		this._logService.info(`[FoundryLocal] Creating FoundryLocalEndpoint with URL: ${endpointUrl}`);
 		
-		try {
-			const modelInfo: IChatModelInformation = await this.getModelInfo(model.id, this._localApiKey || '');
-			this._logService.info(`[FoundryLocal] Got model info for: ${model.id}`);
-			
-			const endpointUrl = `${this._localBaseUrl}/chat/completions`;
-			this._logService.info(`[FoundryLocal] Creating FoundryLocalEndpoint with URL: ${endpointUrl}`);
-			
-			const foundryLocalEndpoint = this._localInstantiationService.createInstance(
-				FoundryLocalEndpoint, 
-				modelInfo, 
-				this._localApiKey || '', 
-				endpointUrl
-			);
-			
-			this._logService.info('[FoundryLocal] Created FoundryLocalEndpoint, calling wrapper...');
-			
-			return this._localLmWrapper.provideLanguageModelResponse(foundryLocalEndpoint, messages, options, options.extensionId, progress, token);
-		} catch (error) {
-			this._logService.error(`[FoundryLocal] Error in provideLanguageModelChatResponse: ${error}`);
-			throw error;
-		}
+		return this._localInstantiationService.createInstance(
+			FoundryLocalEndpoint, 
+			modelInfo, 
+			this._localApiKey || '', 
+			endpointUrl
+		);
 	}
 
 	/**
@@ -313,26 +293,6 @@ export class FoundryLocalLMProvider extends BaseOpenAICompatibleLMProvider {
 			return result;
 		} catch (error) {
 			this._logService.error(`[FoundryLocal] prepareLanguageModelChatInformation error: ${error}`);
-			throw error;
-		}
-	}
-	override async provideTokenCount(
-		model: LanguageModelChatInformation, 
-		text: string | LanguageModelChatMessage | LanguageModelChatMessage2, 
-		token: CancellationToken
-	): Promise<number> {
-		try {
-			const modelInfo: IChatModelInformation = await this.getModelInfo(model.id, this._localApiKey || '');
-			const foundryLocalEndpoint = this._localInstantiationService.createInstance(
-				FoundryLocalEndpoint, 
-				modelInfo, 
-				this._localApiKey || '', 
-				`${this._localBaseUrl}/chat/completions`
-			);
-			
-			return this._localLmWrapper.provideTokenCount(foundryLocalEndpoint, text);
-		} catch (error) {
-			this._logService.error(`[FoundryLocal] Error in provideTokenCount: ${error}`);
 			throw error;
 		}
 	}
